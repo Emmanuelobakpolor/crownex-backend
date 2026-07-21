@@ -16,10 +16,11 @@ class TransactionAdmin(admin.ModelAdmin):
         'reference',
         'user',
         'tx_type',
+        'deposit_method',
         'amount',
         'status',
         'created_at',
     )
-    list_filter = ('tx_type', 'status')
+    list_filter = ('tx_type', 'status', 'deposit_method')
     search_fields = ('reference', 'flw_tx_ref', 'user__email', 'account_number')
     readonly_fields = ('id', 'created_at', 'updated_at')

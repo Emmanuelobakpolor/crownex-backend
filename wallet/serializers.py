@@ -14,9 +14,18 @@ class WalletBalanceSerializer(serializers.ModelSerializer):
 class InitiateDepositSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=0)
     tx_ref = serializers.CharField(max_length=64)
+    method = serializers.ChoiceField(choices=['bank_transfer', 'ussd'])
+    bank_code = serializers.CharField(max_length=20, required=False, allow_blank=True)
 
     def validate_tx_ref(self, value: str) -> str:
         return value.strip()
+
+    def validate(self, attrs):
+        if attrs['method'] == 'ussd' and not attrs.get('bank_code'):
+            raise serializers.ValidationError(
+                {'bank_code': 'Select a bank to generate a USSD code.'}
+            )
+        return attrs
 
 
 class VerifyPaymentSerializer(serializers.Serializer):
@@ -60,6 +69,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             'amount',
             'status',
             'reference',
+            'deposit_method',
             'bank_name',
             'account_number',
             'account_name',
