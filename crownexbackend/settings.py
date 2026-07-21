@@ -244,37 +244,10 @@ OTP_MAX_ATTEMPTS = 5
 OTP_RESEND_COOLDOWN_SECONDS = 60
 
 
-# Flutterwave v4 (F4B) — NGN wallet deposits/withdrawals (wallet app).
-# OAuth2 client-credentials auth: client secret and webhook hash are
-# server-only, never exposed to the app. No public key is needed on the
-# client under v4 — deposits show a virtual account / USSD code returned by
-# the backend instead of launching a client-side SDK.
+# Flutterwave — NGN wallet deposits/withdrawals (wallet app).
+# Secret key and webhook hash are server-only; never expose them to the app.
 APP_NAME = os.environ.get('APP_NAME', 'CrownEx')
-FLW_BASE_URL = os.environ.get('FLW_BASE_URL', 'https://api.flutterwave.cloud/f4b/sandbox')
-FLW_TOKEN_URL = os.environ.get(
-    'FLW_TOKEN_URL',
-    'https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token',
-)
-
-# Individual resource paths, overridable independently of FLW_BASE_URL and
-# of each other — if Flutterwave renames one endpoint, this is a Railway
-# env var change, not a code deploy. (Doesn't cover request/response shape
-# changes, which still need a code change regardless — see wallet/flutterwave.py.)
-FLW_ORDERS_ENDPOINT = os.environ.get('FLW_ORDERS_ENDPOINT', '/orchestration/direct-orders')
-FLW_ORDER_GET_ENDPOINT = os.environ.get('FLW_ORDER_GET_ENDPOINT', '/orders')
-FLW_TRANSFERS_ENDPOINT = os.environ.get('FLW_TRANSFERS_ENDPOINT', '/transfers')
-FLW_TRANSFER_RECIPIENTS_ENDPOINT = os.environ.get(
-    'FLW_TRANSFER_RECIPIENTS_ENDPOINT', '/transfers/recipients'
-)
-FLW_BANKS_ENDPOINT = os.environ.get('FLW_BANKS_ENDPOINT', '/banks')
-FLW_BANK_RESOLVE_ENDPOINT = os.environ.get(
-    'FLW_BANK_RESOLVE_ENDPOINT', '/banks/account-resolve'
-)
-
-FLW_CLIENT_ID = os.environ.get('FLW_CLIENT_ID', '')
-FLW_CLIENT_SECRET = os.environ.get('FLW_CLIENT_SECRET', '')
-# Reserved for card payment methods (AES-256 field encryption) — unused
-# while deposits are bank-transfer/USSD only, kept for when card support
-# is added.
-FLW_ENCRYPTION_KEY = os.environ.get('FLW_ENCRYPTION_KEY', '')
+FLW_BASE_URL = os.environ.get('FLW_BASE_URL', 'https://api.flutterwave.com/v3')
+FLW_SECRET_KEY = os.environ.get('FLW_SECRET_KEY', '')
+FLW_PUBLIC_KEY = os.environ.get('FLW_PUBLIC_KEY', '')
 FLW_WEBHOOK_HASH = os.environ.get('FLW_WEBHOOK_HASH', '')

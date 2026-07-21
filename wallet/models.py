@@ -40,11 +40,6 @@ class TransactionStatus(models.TextChoices):
     FAILED = 'failed', 'Failed'
 
 
-class DepositMethod(models.TextChoices):
-    BANK_TRANSFER = 'bank_transfer', 'Bank Transfer'
-    USSD = 'ussd', 'USSD'
-
-
 class Transaction(models.Model):
     """A single deposit or withdrawal, tracked through its Flutterwave lifecycle."""
 
@@ -62,31 +57,17 @@ class Transaction(models.Model):
         default=TransactionStatus.PENDING,
     )
 
-    # Unique client reference for deposits (also sent to Flutterwave as the
-    # order `reference`), auto-generated for withdrawals (sent as the
-    # transfer `reference`).
+    # Unique client reference for deposits (Flutterwave tx_ref), auto-generated
+    # for withdrawals (Flutterwave transfer reference).
     reference = models.CharField(max_length=64, unique=True)
     flw_tx_ref = models.CharField(max_length=64, unique=True, null=True, blank=True)
 
-    # Flutterwave's own generated IDs — needed to poll GET /orders/{id} or
-    # GET /transfers/{id}, since neither is looked up by our `reference`.
-    flw_order_id = models.CharField(max_length=64, blank=True)
-    flw_transfer_id = models.CharField(max_length=64, blank=True)
-
-    # Deposits: bank_transfer or ussd (no card — see wallet/services.py).
-    deposit_method = models.CharField(
-        max_length=20, choices=DepositMethod.choices, blank=True
-    )
-    # Deposits: the virtual account the user must pay into (bank_transfer),
-    # blank for ussd. Withdrawals: the destination account.
+    # Withdrawal destination — blank for deposits.
     bank_name = models.CharField(max_length=100, blank=True)
     bank_code = models.CharField(max_length=20, blank=True)
     account_number = models.CharField(max_length=10, blank=True)
     account_name = models.CharField(max_length=150, blank=True)
-    virtual_account_expires_at = models.DateTimeField(null=True, blank=True)
 
-    # Deposits: the USSD dial instruction for ussd method. Both: FLW error
-    # messages on failure.
     note = models.TextField(blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)

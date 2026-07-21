@@ -1,10 +1,11 @@
 """API views for the NGN wallet: deposit, withdraw, banks, and history."""
 
+from django.conf import settings
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from . import flutterwave, services
+from . import services
 from .serializers import (
     InitiateDepositSerializer,
     ResolveAccountSerializer,
@@ -28,7 +29,7 @@ class WalletBalanceView(APIView):
 
 
 class InitiateDepositView(APIView):
-    """POST /wallet/initiate-deposit/ — creates a bank-transfer or USSD order."""
+    """POST /wallet/initiate-deposit/"""
 
     def post(self, request):
         serializer = InitiateDepositSerializer(data=request.data)
@@ -38,28 +39,28 @@ class InitiateDepositView(APIView):
                 user=request.user,
                 amount=serializer.validated_data['amount'],
                 tx_ref=serializer.validated_data['tx_ref'],
-                method=serializer.validated_data['method'],
-                bank_code=serializer.validated_data.get('bank_code', ''),
             )
         except services.WalletServiceError as exc:
             return _error_response(exc)
 
+        user = request.user
         return Response(
             {
                 'tx_ref': tx.reference,
                 'amount': str(tx.amount),
-                'method': tx.deposit_method,
-                'account_number': tx.account_number,
-                'bank_name': tx.bank_name,
-                'expires_at': tx.virtual_account_expires_at,
-                'note': tx.note,
+                'public_key': settings.FLW_PUBLIC_KEY,
+                'customer': {
+                    'email': user.email,
+                    'phone': user.phone or '',
+                    'name': user.full_name or user.email,
+                },
             },
             status=status.HTTP_201_CREATED,
         )
 
 
 class VerifyPaymentView(APIView):
-    """POST /wallet/verify-payment/ — safe to call repeatedly while pending."""
+    """POST /wallet/verify-payment/"""
 
     def post(self, request):
         serializer = VerifyPaymentSerializer(data=request.data)
@@ -73,7 +74,7 @@ class VerifyPaymentView(APIView):
 
         return Response(
             {
-                'status': tx.status,
+                'message': 'Payment verified. Wallet credited.',
                 'ngn_balance': str(wallet.ngn_balance),
                 'amount': str(tx.amount),
             }
@@ -81,30 +82,23 @@ class VerifyPaymentView(APIView):
 
 
 class FlutterwaveWebhookView(APIView):
-    """POST /wallet/flw-webhook/ — public endpoint, authenticated by an
-    HMAC-SHA256 signature (flutterwave-signature header) over the raw body.
-
-    Deliberately event-name-agnostic: whatever the payload's `reference` is,
-    both settle paths are tried and each is a safe no-op if it doesn't match
-    a pending transaction of that type. Neither one trusts the webhook body's
-    status — both re-fetch the authoritative state from Flutterwave first.
-    """
+    """POST /wallet/flw-webhook/ — public endpoint, authenticated by Verif-Hash."""
 
     permission_classes = [permissions.AllowAny]
     authentication_classes = []
 
     def post(self, request):
-        raw_body = request.body
-        signature = request.headers.get('flutterwave-signature')
-        if not flutterwave.verify_webhook_signature(raw_body, signature):
+        if request.headers.get('Verif-Hash') != settings.FLW_WEBHOOK_HASH:
             return Response({'detail': 'Invalid signature.'}, status=401)
 
-        data = request.data.get('data') or {}
-        reference = data.get('reference') or request.data.get('reference')
+        payload = request.data
+        event = payload.get('event')
+        data = payload.get('data') or {}
 
-        if reference:
-            services.handle_deposit_webhook(reference)
-            services.handle_transfer_webhook(reference)
+        if event == 'charge.completed' and data.get('status') == 'successful':
+            services.handle_deposit_webhook(data.get('tx_ref'))
+        elif event == 'transfer.completed':
+            services.handle_transfer_webhook(data.get('reference'), data.get('status'))
 
         return Response({'status': 'ok'})
 
