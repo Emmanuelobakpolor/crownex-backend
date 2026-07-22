@@ -63,16 +63,24 @@ def _check_transaction_pin(user, pin: str) -> None:
 
 
 def _raw_plans() -> list[dict]:
-    """Cached GET /get/plans data — avoids hitting PluginNG on every purchase."""
     cached = cache.get(_CATALOGUE_CACHE_KEY)
     if cached is not None:
         return cached
 
     try:
         payload = pluginng.get_plans()
+
+        # DEBUG
+        print("=" * 50)
+        print("PLUGINNG RESPONSE")
+        print(payload)
+        print("=" * 50)
+
     except PluginNGError as exc:
         raise VTUServiceError(
-            f'Could not load plans: {exc.message}', code='pluginng_unreachable', status=502
+            f'Could not load plans: {exc.message}',
+            code='pluginng_unreachable',
+            status=502,
         )
 
     data = payload.get('data') or []
