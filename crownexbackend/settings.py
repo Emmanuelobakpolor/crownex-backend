@@ -255,10 +255,15 @@ FLW_WEBHOOK_HASH = os.environ.get('FLW_WEBHOOK_HASH', '')
 
 
 # PluginNG — VTU purchases: airtime, data (vtu app).
-# Bearer token is a personal access token from your PluginNG dashboard —
-# never expose it to the app. Webhook secret is a random string you set both
-# here and as a path segment in PluginNG's webhook URL config, since PluginNG
-# doesn't sign its webhook payloads.
+# PluginNG has no long-lived API key — auth is a bearer token from POST
+# /login that goes stale on its own schedule (observed invalidation with no
+# clear time-based cause). So we authenticate with the account credentials
+# ourselves and cache the resulting token (see vtu/pluginng.py) instead of
+# storing a token by hand, which had no way to recover once it went stale.
+# Webhook secret is a random string you set both here and as a path segment
+# in PluginNG's webhook URL config, since PluginNG doesn't sign its webhook
+# payloads.
 PLUGINNG_BASE_URL = os.environ.get('PLUGINNG_BASE_URL', 'https://pluginng.com/api')
-PLUGINNG_TOKEN = os.environ.get('PLUGINNG_TOKEN', '')
+PLUGINNG_EMAIL = os.environ.get('PLUGINNG_EMAIL', '')
+PLUGINNG_PASSWORD = os.environ.get('PLUGINNG_PASSWORD', '')
 PLUGINNG_WEBHOOK_SECRET = os.environ.get('PLUGINNG_WEBHOOK_SECRET', '')
