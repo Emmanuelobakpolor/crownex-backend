@@ -14,6 +14,7 @@ urlpatterns = [
     path('api/auth/', include('accounts.urls')),
     path('api/profile/', ProfileView.as_view(), name='profile'),
     path('api/wallet/', include('wallet.urls')),
+    path('api/vtu/', include('vtu.urls')),
 ]
 
 if settings.DEBUG:

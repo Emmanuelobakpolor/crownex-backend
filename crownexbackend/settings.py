@@ -68,6 +68,7 @@ INSTALLED_APPS = [
     # Local
     'accounts',
     'wallet',
+    'vtu',
 ]
 
 MIDDLEWARE = [
@@ -251,3 +252,13 @@ FLW_BASE_URL = os.environ.get('FLW_BASE_URL', 'https://api.flutterwave.com/v3')
 FLW_SECRET_KEY = os.environ.get('FLW_SECRET_KEY', '')
 FLW_PUBLIC_KEY = os.environ.get('FLW_PUBLIC_KEY', '')
 FLW_WEBHOOK_HASH = os.environ.get('FLW_WEBHOOK_HASH', '')
+
+
+# PluginNG — VTU purchases: airtime, data (vtu app).
+# Bearer token is a personal access token from your PluginNG dashboard —
+# never expose it to the app. Webhook secret is a random string you set both
+# here and as a path segment in PluginNG's webhook URL config, since PluginNG
+# doesn't sign its webhook payloads.
+PLUGINNG_BASE_URL = os.environ.get('PLUGINNG_BASE_URL', 'https://pluginng.com/api')
+PLUGINNG_TOKEN = os.environ.get('PLUGINNG_TOKEN', '')
+PLUGINNG_WEBHOOK_SECRET = os.environ.get('PLUGINNG_WEBHOOK_SECRET', '')

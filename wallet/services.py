@@ -42,6 +42,26 @@ def get_or_create_wallet(user) -> Wallet:
     return wallet
 
 
+@transaction.atomic
+def debit_wallet(user, amount: Decimal) -> Wallet:
+    """Generic balance debit for other apps (e.g. vtu). Raises on insufficient funds."""
+    wallet = Wallet.objects.select_for_update().get_or_create(user=user)[0]
+    if wallet.ngn_balance < amount:
+        raise WalletServiceError('Insufficient balance.', code='insufficient_balance')
+    wallet.ngn_balance = wallet.ngn_balance - amount
+    wallet.save(update_fields=['ngn_balance', 'updated_at'])
+    return wallet
+
+
+@transaction.atomic
+def credit_wallet(user, amount: Decimal) -> Wallet:
+    """Generic balance credit for other apps (e.g. vtu refunds)."""
+    wallet = Wallet.objects.select_for_update().get_or_create(user=user)[0]
+    wallet.ngn_balance = wallet.ngn_balance + amount
+    wallet.save(update_fields=['ngn_balance', 'updated_at'])
+    return wallet
+
+
 # ─── Deposit ──────────────────────────────────────────────────────────────
 
 
