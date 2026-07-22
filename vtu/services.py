@@ -69,13 +69,6 @@ def _raw_plans() -> list[dict]:
 
     try:
         payload = pluginng.get_plans()
-
-        # DEBUG
-        print("=" * 50)
-        print("PLUGINNG RESPONSE")
-        print(payload)
-        print("=" * 50)
-
     except PluginNGError as exc:
         raise VTUServiceError(
             f'Could not load plans: {exc.message}',
@@ -94,7 +87,9 @@ def get_catalogue() -> dict:
     airtime_networks = []
     data_networks = []
     for item in _raw_plans():
-        if item.get('status') != '1':
+        # PluginNG returns status as an int (1), not the string shown in
+        # their own docs example ("1") — compare on the stringified form.
+        if str(item.get('status')) != '1':
             continue
         if item.get('category') == 'Airtime':
             airtime_networks.append(
