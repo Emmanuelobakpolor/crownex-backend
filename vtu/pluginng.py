@@ -47,9 +47,11 @@ def _request(method: str, path: str, **kwargs) -> dict:
     except ValueError as exc:
         raise PluginNGError('PluginNG returned a non-JSON response.') from exc
 
-    if response.status_code >= 500:
+    if not response.ok:
         raise PluginNGError(
-            payload.get('message', 'PluginNG is temporarily unavailable.'), payload
+            payload.get('message')
+            or f'PluginNG returned {response.status_code}.',
+            payload,
         )
 
     return payload

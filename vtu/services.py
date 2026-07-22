@@ -76,7 +76,8 @@ def _raw_plans() -> list[dict]:
         )
 
     data = payload.get('data') or []
-    cache.set(_CATALOGUE_CACHE_KEY, data, _CATALOGUE_CACHE_TTL)
+    if data:
+        cache.set(_CATALOGUE_CACHE_KEY, data, _CATALOGUE_CACHE_TTL)
     return data
 
 
