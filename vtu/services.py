@@ -172,10 +172,17 @@ def get_cable_bouquets(network: str) -> list[dict]:
 
 
 def get_electricity_variations(network: str) -> list[dict]:
-    """Variation types (e.g. Prepaid/Postpaid) for an electricity biller."""
+    """Variation types for an electricity biller.
+
+    PluginNG's docs for /purchase/electricity and /verify/card both fix
+    variation_code/type to exactly "Prepaid" or "Postpaid" — there's no
+    per-biller variation, and their /fetch/bouquet endpoint (which works
+    fine for cable) reliably 500s for electricity billers, so we return
+    these two directly instead of depending on it.
+    """
     return [
-        {'variation_code': item.get('variation_code'), 'name': item.get('name')}
-        for item in _fetch_bouquet_data(network)
+        {'variation_code': 'Prepaid', 'name': 'Prepaid'},
+        {'variation_code': 'Postpaid', 'name': 'Postpaid'},
     ]
 
 
