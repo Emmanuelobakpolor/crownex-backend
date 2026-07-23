@@ -26,7 +26,8 @@ from django.core.cache import cache
 PLUGINNG_BASE_URL = getattr(settings, 'PLUGINNG_BASE_URL', 'https://pluginng.com/api')
 _TIMEOUT = 30
 _TOKEN_CACHE_KEY = 'vtu:pluginng:token'
-_TOKEN_CACHE_TTL = 60 * 60 * 6  # 6h — well under any observed invalidation window
+_TOKEN_CACHE_TTL = 50 * 60  # 50 min — PluginNG doesn't document token expiry,
+# so we refresh proactively well inside any plausible 1-hour-style window.
 
 
 class PluginNGError(Exception):
@@ -98,20 +99,37 @@ def _send(method: str, url: str, token: str, **kwargs) -> requests.Response:
         raise PluginNGError(f'Could not reach PluginNG: {exc}') from exc
 
 
-def _request(method: str, path: str, **kwargs) -> dict:
-    url = f'{PLUGINNG_BASE_URL}{path}'
-    token = _get_token()
-    response = _send(method, url, token, **kwargs)
-
-    if response.status_code == 401:
-        # Cached token is stale/invalidated elsewhere — re-authenticate once.
-        token = _get_token(force_refresh=True)
-        response = _send(method, url, token, **kwargs)
-
+def _parse(response: requests.Response) -> dict:
     try:
-        payload = response.json()
+        return response.json()
     except ValueError as exc:
         raise PluginNGError('PluginNG returned a non-JSON response.') from exc
+
+
+def _looks_unauthenticated(response: requests.Response, payload: dict) -> bool:
+    """PluginNG sometimes signals a dead token as a plain 401, but Laravel-style
+    APIs like this one can also answer 200 with an "Unauthenticated" message
+    in the body — catch both so a stale cached token always triggers a retry."""
+    if response.status_code == 401:
+        return True
+    message = payload.get('message')
+    return isinstance(message, str) and 'unauthenticat' in message.lower()
+
+
+def _request(method: str, path: str, **kwargs) -> dict:
+    """Single entry point for every PluginNG call: attaches the cached
+    bearer token, and — if the token turns out to be stale — re-authenticates
+    exactly once and retries before giving up."""
+    url = f'{PLUGINNG_BASE_URL}{path}'
+
+    token = _get_token()
+    response = _send(method, url, token, **kwargs)
+    payload = _parse(response)
+
+    if _looks_unauthenticated(response, payload):
+        token = _get_token(force_refresh=True)
+        response = _send(method, url, token, **kwargs)
+        payload = _parse(response)
 
     if not response.ok:
         raise PluginNGError(
