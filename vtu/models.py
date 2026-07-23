@@ -16,6 +16,8 @@ def generate_vtu_reference() -> str:
 class ServiceType(models.TextChoices):
     AIRTIME = 'airtime', 'Airtime'
     DATA = 'data', 'Data'
+    CABLE = 'cable', 'Cable TV'
+    ELECTRICITY = 'electricity', 'Electricity'
 
 
 class VTUStatus(models.TextChoices):
@@ -47,8 +49,9 @@ class VTUTransaction(models.Model):
     service = models.CharField(max_length=16, choices=ServiceType.choices)
     network = models.CharField(max_length=30)
     subcategory_id = models.CharField(max_length=10)
-    plan_id = models.CharField(max_length=100, blank=True)  # data plan label; blank for airtime
+    plan_id = models.CharField(max_length=100, blank=True)  # data plan / bouquet label; blank for airtime
     phone = models.CharField(max_length=15)
+    card_number = models.CharField(max_length=20, blank=True)  # smartcard or meter number
 
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     status = models.CharField(

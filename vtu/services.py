@@ -31,9 +31,12 @@ from .pluginng import PluginNGError
 
 MIN_AIRTIME = Decimal('50')
 MAX_AIRTIME = Decimal('50000')
+MIN_ELECTRICITY = Decimal('500')
+MAX_ELECTRICITY = Decimal('100000')
 
 _CATALOGUE_CACHE_KEY = 'vtu:pluginng:plans'
 _CATALOGUE_CACHE_TTL = 300  # seconds
+_BOUQUET_CACHE_TTL = 600  # seconds — cable bouquets / electricity variation types
 
 
 class VTUServiceError(Exception):
@@ -83,19 +86,22 @@ def _raw_plans() -> list[dict]:
 
 
 def get_catalogue() -> dict:
-    """Airtime networks, plus data networks with their plan lists and prices."""
+    """Airtime/data networks, plus cable and electricity billers."""
     airtime_networks = []
     data_networks = []
+    cable_billers = []
+    electricity_billers = []
     for item in _raw_plans():
         # PluginNG returns status as an int (1), not the string shown in
         # their own docs example ("1") — compare on the stringified form.
         if str(item.get('status')) != '1':
             continue
-        if item.get('category') == 'Airtime':
+        category = item.get('category')
+        if category == 'Airtime':
             airtime_networks.append(
                 {'subcategory_id': item.get('subcategory_id'), 'name': item.get('title')}
             )
-        elif item.get('category') == 'Data':
+        elif category == 'Data':
             data_networks.append(
                 {
                     'subcategory_id': item.get('subcategory_id'),
@@ -103,7 +109,107 @@ def get_catalogue() -> dict:
                     'plans': item.get('plan') or [],
                 }
             )
-    return {'airtime': airtime_networks, 'data': data_networks}
+        elif category == 'Cable':
+            cable_billers.append(
+                {'subcategory_id': item.get('subcategory_id'), 'name': item.get('title')}
+            )
+        elif category == 'Electricity':
+            electricity_billers.append(
+                {
+                    'subcategory_id': item.get('subcategory_id'),
+                    'name': item.get('title'),
+                    'service_id': item.get('serviceID'),
+                }
+            )
+    return {
+        'airtime': airtime_networks,
+        'data': data_networks,
+        'cable': cable_billers,
+        'electricity': electricity_billers,
+    }
+
+
+def _fetch_bouquet_data(network: str) -> list[dict]:
+    """Cached GET /fetch/bouquet — cable bouquets or electricity variation types."""
+    cache_key = f'vtu:pluginng:bouquet:{network}'
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        payload = pluginng.fetch_bouquet(network)
+    except PluginNGError as exc:
+        raise VTUServiceError(
+            f'Could not load plans for {network}: {exc.message}',
+            code='pluginng_unreachable',
+            status=502,
+        )
+
+    data = payload.get('data') or []
+    if data:
+        cache.set(cache_key, data, _BOUQUET_CACHE_TTL)
+    return data
+
+
+def _cable_code(network: str) -> str:
+    """PluginNG's cable endpoints (bouquet fetch, verify, purchase) all expect
+    the lowercase network code ('gotv'/'dstv'/'startimes'), not the display
+    title ('GOTV'/'DSTV'/'STARTIMES') that get/plans returns — electricity
+    billers keep their exact catalogue title instead, so this is cable-only."""
+    return network.lower()
+
+
+def get_cable_bouquets(network: str) -> list[dict]:
+    """Bouquets (variation_code/name/amount) for a cable biller like 'GOTV'."""
+    return [
+        {
+            'variation_code': item.get('variation_code'),
+            'name': item.get('name'),
+            'amount': item.get('variation_amount'),
+        }
+        for item in _fetch_bouquet_data(_cable_code(network))
+    ]
+
+
+def get_electricity_variations(network: str) -> list[dict]:
+    """Variation types (e.g. Prepaid/Postpaid) for an electricity biller."""
+    return [
+        {'variation_code': item.get('variation_code'), 'name': item.get('name')}
+        for item in _fetch_bouquet_data(network)
+    ]
+
+
+def _resolve_cable_bouquet_amount(network: str, variation_code: str) -> Decimal:
+    """Never trust a client-supplied price — look it up from PluginNG's bouquet list."""
+    for item in _fetch_bouquet_data(_cable_code(network)):
+        if item.get('variation_code') == variation_code:
+            return Decimal(str(item.get('variation_amount', 0)))
+    raise VTUServiceError('Unknown bouquet for this provider.', code='invalid_plan')
+
+
+def verify_smartcard(network: str, cardno: str) -> dict:
+    """POST /verify/card for cable — response shape isn't documented by
+    PluginNG, so we pass through whatever they return and let the caller
+    look for a recognizable name field rather than assuming one."""
+    try:
+        payload = pluginng.verify_card(plan=_cable_code(network), cardno=cardno)
+    except PluginNGError as exc:
+        raise VTUServiceError(
+            f'Could not verify smartcard: {exc.message}', code='pluginng_unreachable', status=502
+        )
+    return payload.get('data') if isinstance(payload.get('data'), dict) else payload
+
+
+def verify_meter(network: str, cardno: str, meter_type: str) -> dict:
+    """POST /verify/card for electricity — same undocumented-shape caveat as
+    verify_smartcard."""
+    try:
+        payload = pluginng.verify_card(plan=network, cardno=cardno, meter_type=meter_type)
+    except PluginNGError as exc:
+        raise VTUServiceError(
+            f'Could not verify meter: {exc.message}', code='pluginng_unreachable', status=502
+        )
+    return payload.get('data') if isinstance(payload.get('data'), dict) else payload
 
 
 def _resolve_data_plan_amount(subcategory_id: str, plan_id: str) -> Decimal:
@@ -118,7 +224,7 @@ def _resolve_data_plan_amount(subcategory_id: str, plan_id: str) -> Decimal:
 
 
 def _create_pending_tx(
-    *, user, service, network, subcategory_id, plan_id, phone, amount
+    *, user, service, network, subcategory_id, plan_id, phone, amount, card_number=''
 ) -> VTUTransaction:
     for _ in range(5):
         reference = generate_vtu_reference()
@@ -131,6 +237,7 @@ def _create_pending_tx(
                 plan_id=plan_id,
                 phone=phone,
                 amount=amount,
+                card_number=card_number,
                 status=VTUStatus.PENDING,
                 reference=reference,
             )
@@ -239,6 +346,100 @@ def buy_data(
         _refund_and_fail(tx.pk, f'Purchase request failed: {exc.message}')
         raise VTUServiceError(
             'Data purchase could not be completed. Your balance has been refunded.',
+            code='provider_failed', status=502,
+        )
+
+    return _apply_provider_result(tx, payload)
+
+
+def buy_cable(
+    user,
+    *,
+    subcategory_id: str,
+    network: str,
+    phone: str,
+    cardno: str,
+    variation_code: str,
+    transaction_pin: str,
+) -> VTUTransaction:
+    _check_transaction_pin(user, transaction_pin)
+    phone = _normalize_phone(phone)
+    cardno = cardno.strip()
+    if not cardno.isdigit():
+        raise VTUServiceError('Enter a valid smartcard number.', code='invalid_cardno')
+    amount = _resolve_cable_bouquet_amount(network, variation_code)
+
+    try:
+        debit_wallet(user, amount)
+    except WalletServiceError as exc:
+        raise VTUServiceError(exc.message, code=exc.code, status=exc.status)
+
+    tx = _create_pending_tx(
+        user=user, service=ServiceType.CABLE, network=network,
+        subcategory_id=subcategory_id, plan_id=variation_code, phone=phone,
+        amount=amount, card_number=cardno,
+    )
+
+    try:
+        payload = pluginng.buy_cable(
+            plan=_cable_code(network), phonenumber=phone, amount=str(amount),
+            cardno=cardno, variation_code=variation_code,
+            custom_reference=tx.reference,
+        )
+    except PluginNGError as exc:
+        _refund_and_fail(tx.pk, f'Purchase request failed: {exc.message}')
+        raise VTUServiceError(
+            'Cable subscription could not be completed. Your balance has been refunded.',
+            code='provider_failed', status=502,
+        )
+
+    return _apply_provider_result(tx, payload)
+
+
+def buy_electricity(
+    user,
+    *,
+    subcategory_id: str,
+    network: str,
+    service_id: str,
+    phone: str,
+    cardno: str,
+    variation_code: str,
+    amount: Decimal,
+    transaction_pin: str,
+) -> VTUTransaction:
+    _check_transaction_pin(user, transaction_pin)
+    phone = _normalize_phone(phone)
+    cardno = cardno.strip()
+    if not cardno.isdigit():
+        raise VTUServiceError('Enter a valid meter number.', code='invalid_cardno')
+    if amount < MIN_ELECTRICITY or amount > MAX_ELECTRICITY:
+        raise VTUServiceError(
+            f'Amount must be between ₦{MIN_ELECTRICITY} and ₦{MAX_ELECTRICITY}.',
+            code='amount_out_of_range',
+        )
+
+    try:
+        debit_wallet(user, amount)
+    except WalletServiceError as exc:
+        raise VTUServiceError(exc.message, code=exc.code, status=exc.status)
+
+    tx = _create_pending_tx(
+        user=user, service=ServiceType.ELECTRICITY, network=network,
+        subcategory_id=subcategory_id, plan_id=variation_code, phone=phone,
+        amount=amount, card_number=cardno,
+    )
+
+    try:
+        payload = pluginng.buy_electricity(
+            plan=network, phonenumber=phone, amount=str(amount), cardno=cardno,
+            variation_code=variation_code, service_id=service_id,
+            custom_reference=tx.reference,
+        )
+    except PluginNGError as exc:
+        _refund_and_fail(tx.pk, f'Purchase request failed: {exc.message}')
+        raise VTUServiceError(
+            'Electricity payment could not be completed. Your balance has been refunded.',
             code='provider_failed', status=502,
         )
 

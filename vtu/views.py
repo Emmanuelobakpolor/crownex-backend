@@ -8,7 +8,11 @@ from rest_framework.views import APIView
 from . import services
 from .serializers import (
     BuyAirtimeSerializer,
+    BuyCableSerializer,
     BuyDataSerializer,
+    BuyElectricitySerializer,
+    VerifyMeterSerializer,
+    VerifySmartcardSerializer,
     VTUTransactionSerializer,
 )
 
@@ -49,6 +53,82 @@ class BuyDataView(APIView):
         serializer.is_valid(raise_exception=True)
         try:
             tx = services.buy_data(request.user, **serializer.validated_data)
+        except services.VTUServiceError as exc:
+            return _error_response(exc)
+        return Response(VTUTransactionSerializer(tx).data, status=status.HTTP_201_CREATED)
+
+
+class CableBouquetsView(APIView):
+    """GET /vtu/cable/bouquets/?network=gotv"""
+
+    def get(self, request):
+        network = request.query_params.get('network', '')
+        try:
+            bouquets = services.get_cable_bouquets(network)
+        except services.VTUServiceError as exc:
+            return _error_response(exc)
+        return Response({'bouquets': bouquets})
+
+
+class VerifySmartcardView(APIView):
+    """POST /vtu/cable/verify/"""
+
+    def post(self, request):
+        serializer = VerifySmartcardSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            data = services.verify_smartcard(**serializer.validated_data)
+        except services.VTUServiceError as exc:
+            return _error_response(exc)
+        return Response(data)
+
+
+class BuyCableView(APIView):
+    """POST /vtu/cable/"""
+
+    def post(self, request):
+        serializer = BuyCableSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            tx = services.buy_cable(request.user, **serializer.validated_data)
+        except services.VTUServiceError as exc:
+            return _error_response(exc)
+        return Response(VTUTransactionSerializer(tx).data, status=status.HTTP_201_CREATED)
+
+
+class ElectricityVariationsView(APIView):
+    """GET /vtu/electricity/variations/?network=Eko-Electric"""
+
+    def get(self, request):
+        network = request.query_params.get('network', '')
+        try:
+            variations = services.get_electricity_variations(network)
+        except services.VTUServiceError as exc:
+            return _error_response(exc)
+        return Response({'variations': variations})
+
+
+class VerifyMeterView(APIView):
+    """POST /vtu/electricity/verify/"""
+
+    def post(self, request):
+        serializer = VerifyMeterSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            data = services.verify_meter(**serializer.validated_data)
+        except services.VTUServiceError as exc:
+            return _error_response(exc)
+        return Response(data)
+
+
+class BuyElectricityView(APIView):
+    """POST /vtu/electricity/"""
+
+    def post(self, request):
+        serializer = BuyElectricitySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            tx = services.buy_electricity(request.user, **serializer.validated_data)
         except services.VTUServiceError as exc:
             return _error_response(exc)
         return Response(VTUTransactionSerializer(tx).data, status=status.HTTP_201_CREATED)

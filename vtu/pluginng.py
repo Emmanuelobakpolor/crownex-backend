@@ -163,3 +163,68 @@ def buy_data(
 def requery(custom_reference: str) -> dict:
     """GET /requery/{custom_reference} — check a purchase's current status."""
     return _request('GET', f'/requery/{custom_reference}')
+
+
+def fetch_bouquet(plan: str) -> dict:
+    """GET /fetch/bouquet?plan=<title> — cable bouquets or electricity variations
+    for a given biller title (e.g. "gotv", "Eko-Electric")."""
+    return _request('GET', '/fetch/bouquet', params={'plan': plan})
+
+
+def verify_card(*, plan: str, cardno: str, meter_type: str | None = None) -> dict:
+    """POST /verify/card — resolves a smartcard (cable) or meter (electricity,
+    pass meter_type) number to the customer's name before charging."""
+    data = {'plan': plan, 'cardno': cardno}
+    if meter_type:
+        data['type'] = meter_type
+    return _request('POST', '/verify/card', data=data)
+
+
+def buy_cable(
+    *,
+    plan: str,
+    phonenumber: str,
+    amount: str,
+    cardno: str,
+    variation_code: str,
+    custom_reference: str,
+) -> dict:
+    """POST /purchase/cable"""
+    return _request(
+        'POST',
+        '/purchase/cable',
+        data={
+            'plan': plan,
+            'phonenumber': phonenumber,
+            'amount': amount,
+            'cardno': cardno,
+            'variation_code': variation_code,
+            'custom_reference': custom_reference,
+        },
+    )
+
+
+def buy_electricity(
+    *,
+    plan: str,
+    phonenumber: str,
+    amount: str,
+    cardno: str,
+    variation_code: str,
+    service_id: str,
+    custom_reference: str,
+) -> dict:
+    """POST /purchase/electricity"""
+    return _request(
+        'POST',
+        '/purchase/electricity',
+        data={
+            'plan': plan,
+            'phonenumber': phonenumber,
+            'amount': amount,
+            'cardno': cardno,
+            'variation_code': variation_code,
+            'serviceID': service_id,
+            'custom_reference': custom_reference,
+        },
+    )
