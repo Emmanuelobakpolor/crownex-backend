@@ -15,6 +15,7 @@ urlpatterns = [
     path('api/profile/', ProfileView.as_view(), name='profile'),
     path('api/wallet/', include('wallet.urls')),
     path('api/vtu/', include('vtu.urls')),
+    path('api/giftcards/', include('giftcards.urls')),
 ]
 
 if settings.DEBUG:

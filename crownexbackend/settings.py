@@ -4,6 +4,7 @@ Django settings for crownexbackend project.
 
 import os
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import dj_database_url
@@ -69,6 +70,7 @@ INSTALLED_APPS = [
     'accounts',
     'wallet',
     'vtu',
+    'giftcards',
 ]
 
 MIDDLEWARE = [
@@ -267,3 +269,14 @@ PLUGINNG_BASE_URL = os.environ.get('PLUGINNG_BASE_URL', 'https://pluginng.com/ap
 PLUGINNG_EMAIL = os.environ.get('PLUGINNG_EMAIL', '')
 PLUGINNG_PASSWORD = os.environ.get('PLUGINNG_PASSWORD', '')
 PLUGINNG_WEBHOOK_SECRET = os.environ.get('PLUGINNG_WEBHOOK_SECRET', '')
+
+
+# Reloadly — digital gift cards (giftcards app): Apple/iTunes, Amazon,
+# Google Play, etc. Auth is OAuth2 client_credentials (see
+# giftcards/reloadly.py); RELOADLY_NGN_PER_USD is our own app-controlled
+# FX rate, not something Reloadly provides.
+RELOADLY_CLIENT_ID = os.environ.get('RELOADLY_CLIENT_ID', '')
+RELOADLY_CLIENT_SECRET = os.environ.get('RELOADLY_CLIENT_SECRET', '')
+RELOADLY_SANDBOX = os.environ.get('RELOADLY_SANDBOX', 'true').lower() == 'true'
+RELOADLY_NGN_PER_USD = Decimal(os.environ.get('RELOADLY_NGN_PER_USD', '1700'))
+RELOADLY_WEBHOOK_SECRET = os.environ.get('RELOADLY_WEBHOOK_SECRET', '')
