@@ -4,7 +4,7 @@ Django settings for crownexbackend project.
 
 import os
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import dj_database_url
@@ -278,5 +278,10 @@ PLUGINNG_WEBHOOK_SECRET = os.environ.get('PLUGINNG_WEBHOOK_SECRET', '')
 RELOADLY_CLIENT_ID = os.environ.get('RELOADLY_CLIENT_ID', '')
 RELOADLY_CLIENT_SECRET = os.environ.get('RELOADLY_CLIENT_SECRET', '')
 RELOADLY_SANDBOX = os.environ.get('RELOADLY_SANDBOX', 'true').lower() == 'true'
-RELOADLY_NGN_PER_USD = Decimal(os.environ.get('RELOADLY_NGN_PER_USD', '1700'))
+try:
+    # Railway variables set to blank still exist as '', which Decimal('')
+    # can't parse — fall back to the default instead of crashing startup.
+    RELOADLY_NGN_PER_USD = Decimal(os.environ.get('RELOADLY_NGN_PER_USD') or '1700')
+except InvalidOperation:
+    RELOADLY_NGN_PER_USD = Decimal('1700')
 RELOADLY_WEBHOOK_SECRET = os.environ.get('RELOADLY_WEBHOOK_SECRET', '')
