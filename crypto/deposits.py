@@ -31,15 +31,30 @@ _ADDRESS_POLL_ATTEMPTS = 5
 _ADDRESS_POLL_DELAY_SECONDS = 1
 
 
+def _derive_names(user) -> tuple[str, str]:
+    """Split the user's full_name into (first, last) for Quidax. Never
+    falls back to the email (Quidax rejects '@'/'.' in a name field — that
+    was the original bug here) or a bare symbol like '-' — a single-word
+    name is reused as both first and last rather than paired with a
+    placeholder Quidax's validation might also reject."""
+    full_name = (user.full_name or '').strip()
+    if not full_name:
+        return 'Customer', 'Customer'
+    parts = full_name.split(None, 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return parts[0], parts[0]
+
+
 def get_or_create_sub_account(user) -> QuidaxSubAccount:
     existing = QuidaxSubAccount.objects.filter(user=user).first()
     if existing:
         return existing
 
-    first_name, _, last_name = (user.full_name or user.email).partition(' ')
+    first_name, last_name = _derive_names(user)
     try:
         payload = quidax.create_sub_account(
-            email=user.email, first_name=first_name or user.email, last_name=last_name or '-'
+            email=user.email, first_name=first_name, last_name=last_name
         )
     except QuidaxError as exc:
         logger.error(

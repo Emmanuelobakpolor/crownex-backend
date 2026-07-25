@@ -1,13 +1,18 @@
-"""Provisions a Quidax sub-account the moment a user is created.
+"""Provisions a Quidax sub-account as soon as the user has a real name.
 
-Eager instead of lazy (contrast with get_or_create_sub_account's original
-call site — the first deposit-address request) — this way the sub-account
-usually already exists by the time a user reaches crypto, and a Quidax
-failure surfaces in the server log at signup time instead of as a
-confusing error deep in the deposit flow. Still never blocks signup: any
-failure here is caught and logged, nothing more. get_or_create_sub_account
-itself is idempotent (checks for an existing row first), so this and the
-lazy fallback in deposits.get_deposit_address can't double-provision.
+Registration here is multi-step (register -> verify OTP -> complete_profile
+sets full_name + password), so hooking this to User creation (created=True)
+fires before full_name exists — the original version of this signal did
+exactly that, and Quidax rejected every one of these calls because the
+fallback ended up sending the user's email as a "name". Gating on
+full_name being non-blank instead means this actually fires once, right
+when complete_profile's save() gives the user a real name; every other
+save (registration, later profile edits) is a cheap no-op since
+get_or_create_sub_account checks for an existing row first.
+
+Never blocks the request that triggered it: any failure here is caught
+and logged, nothing more. The lazy fallback in deposits.get_deposit_address
+covers anything this misses (e.g. Quidax was down at the time).
 """
 
 from __future__ import annotations
@@ -24,9 +29,11 @@ logger = logging.getLogger(__name__)
 
 
 @receiver(post_save, sender=User)
-def provision_quidax_subaccount(sender, instance: User, created: bool, **kwargs) -> None:
-    if not created or not settings.QUIDAX_SECRET_KEY:
+def provision_quidax_subaccount(sender, instance: User, **kwargs) -> None:
+    if not settings.QUIDAX_SECRET_KEY:
         return
+    if not (instance.full_name or '').strip():
+        return  # still mid-registration — wait for complete_profile
 
     # Local import: crypto.deposits pulls in crypto.orders at module load
     # time, and signals.py is itself imported from crypto/apps.py:ready() —
