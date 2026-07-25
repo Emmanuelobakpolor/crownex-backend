@@ -1,8 +1,10 @@
 """Provision a Quidax sub-account for every existing user missing one.
 
-Sub-accounts are normally created lazily on first deposit-address request
-(see crypto/deposits.py) — this command is for provisioning ahead of time,
-e.g. after enabling crypto for a user base that predates this feature.
+Sub-accounts are normally created automatically (a post_save signal on
+User — see crypto/signals.py — with a lazy fallback on first
+deposit-address request in crypto/deposits.py). This command is for
+backfilling users who predate the feature, or whose automatic attempt
+failed (e.g. Quidax was unreachable at the time).
 """
 
 from django.core.management.base import BaseCommand

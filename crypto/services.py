@@ -53,11 +53,18 @@ def check_transaction_pin(user, pin: str) -> None:
 # entry maps our symbol to how its NGN price is resolved: a direct NGN
 # market where Quidax has one, otherwise via its USDT market * usdtngn.
 SUPPORTED_COINS: dict[str, dict] = {
-    'btc': {'name': 'Bitcoin', 'market': 'btcngn'},
-    'eth': {'name': 'Ethereum', 'market': 'ethngn'},
-    'usdt': {'name': 'Tether', 'market': 'usdtngn'},
-    'sol': {'name': 'Solana', 'market': 'solusdt', 'via_usdt': True},
+    'btc': {'name': 'Bitcoin', 'market': 'btcngn', 'color': '#F7931A'},
+    'eth': {'name': 'Ethereum', 'market': 'ethngn', 'color': '#627EEA'},
+    'usdt': {'name': 'Tether', 'market': 'usdtngn', 'color': '#26A17B'},
+    'sol': {'name': 'Solana', 'market': 'solusdt', 'via_usdt': True, 'color': '#9945FF'},
 }
+
+
+def _logo_url(symbol: str) -> str:
+    """CoinCap's icon CDN — not from Quidax, just a well-known public icon
+    set keyed by lowercase symbol. Client falls back to color+letter if the
+    image fails to load."""
+    return f'https://assets.coincap.io/assets/icons/{symbol.lower()}@2x.png'
 
 
 # ─── Prices ─────────────────────────────────────────────────────────────────
@@ -134,6 +141,9 @@ def get_prices() -> list[dict]:
                 'symbol': symbol,
                 'name': meta['name'],
                 'rate_ngn': str(rate) if rate is not None else None,
+                'logo_url': _logo_url(symbol),
+                'color': meta.get('color', '#0052FF'),
+                'letter': symbol[0].upper() if symbol else '?',
             }
         )
     return rows

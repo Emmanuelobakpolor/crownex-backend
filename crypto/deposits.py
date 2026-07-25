@@ -1,14 +1,19 @@
 """Sub-account provisioning, deposit address lookup, and the Quidax deposit
 webhook.
 
-Sub-accounts are provisioned lazily — the first time a user actually asks
-for a deposit address — rather than at registration, so a Quidax outage can
-never block signup. A management command (backfill_quidax_subaccounts)
-covers provisioning ahead of time for existing users if you want it.
+get_or_create_sub_account is called from two places: eagerly, by the
+post_save signal in signals.py (fires right after a user is created), and
+lazily here as a fallback the first time someone actually requests a
+deposit address — in case the signal's attempt failed (e.g. Quidax was
+down at signup) or ran before QUIDAX_SECRET_KEY was configured. Either way
+it never blocks signup itself. A management command
+(backfill_quidax_subaccounts) also covers provisioning ahead of time for
+existing users.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from decimal import Decimal
 
@@ -19,6 +24,8 @@ from .models import CryptoDepositAddress, CryptoDepositEvent, CryptoOrder, Order
 from .orders import _log as _log_order_event
 from .quidax import QuidaxError
 from .services import CryptoServiceError, _validate_coin, credit_crypto_available
+
+logger = logging.getLogger(__name__)
 
 _ADDRESS_POLL_ATTEMPTS = 5
 _ADDRESS_POLL_DELAY_SECONDS = 1
@@ -35,6 +42,12 @@ def get_or_create_sub_account(user) -> QuidaxSubAccount:
             email=user.email, first_name=first_name or user.email, last_name=last_name or '-'
         )
     except QuidaxError as exc:
+        logger.error(
+            'Quidax sub-account creation failed for %s: %s (payload=%s)',
+            user.email,
+            exc.message,
+            exc.payload,
+        )
         raise CryptoServiceError(
             f'Could not set up your crypto account: {exc.message}',
             code='quidax_unreachable',
@@ -44,6 +57,7 @@ def get_or_create_sub_account(user) -> QuidaxSubAccount:
     data = payload.get('data') or {}
     quidax_id = str(data.get('id') or '')
     if not quidax_id:
+        logger.error('Quidax sub-account response had no id for %s: %s', user.email, payload)
         raise CryptoServiceError(
             'Quidax did not return a sub-account id.', code='quidax_error', status=502
         )
