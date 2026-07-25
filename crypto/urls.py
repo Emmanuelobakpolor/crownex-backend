@@ -25,5 +25,10 @@ urlpatterns = [
     path('address/<str:coin>/', views.DepositAddressView.as_view(), name='crypto-address'),
     path('webhook/quidax/', views.QuidaxWebhookView.as_view(), name='crypto-webhook'),
     path('withdraw/', views.WithdrawView.as_view(), name='crypto-withdraw'),
+    path(
+        'withdraw/estimate/',
+        views.WithdrawEstimateView.as_view(),
+        name='crypto-withdraw-estimate',
+    ),
     path('withdrawals/', views.WithdrawalHistoryView.as_view(), name='crypto-withdrawals'),
 ]

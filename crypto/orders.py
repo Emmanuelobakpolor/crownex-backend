@@ -29,6 +29,7 @@ from .models import (
 from .quidax import QuidaxError
 from .services import (
     CryptoServiceError,
+    check_transaction_pin,
     credit_crypto_available,
     debit_reserved_crypto,
     get_locked_quote,
@@ -161,7 +162,9 @@ def _execute_quidax_buy(order: CryptoOrder, *, refund_on_fail: bool) -> CryptoOr
     return order
 
 
-def place_buy_order(user, *, quote_id, idempotency_key: str | None = None) -> CryptoOrder:
+def place_buy_order(
+    user, *, quote_id, pin: str, idempotency_key: str | None = None
+) -> CryptoOrder:
     """Creates the order from a locked quote, then tries each payment path
     in order: wallet balance -> Flutterwave -> bank transfer fallback.
     Wallet-funded orders execute immediately; the other two paths leave the
@@ -169,6 +172,8 @@ def place_buy_order(user, *, quote_id, idempotency_key: str | None = None) -> Cr
     existing = _existing_order_for_idempotency_key(idempotency_key)
     if existing:
         return existing
+
+    check_transaction_pin(user, pin)
 
     with transaction.atomic():
         quote = get_locked_quote(user, quote_id, QuoteType.BUY)
@@ -323,7 +328,9 @@ def _start_processing(order: CryptoOrder) -> CryptoOrder:
     return order
 
 
-def place_sell_order(user, *, quote_id, idempotency_key: str | None = None) -> CryptoOrder:
+def place_sell_order(
+    user, *, quote_id, pin: str, idempotency_key: str | None = None
+) -> CryptoOrder:
     """Reserves the crypto and sells immediately if the user has enough
     balance. Otherwise the order waits in waiting_deposit — the deposit
     address to fund it comes from crypto/deposits.py (a later phase); for
@@ -332,6 +339,8 @@ def place_sell_order(user, *, quote_id, idempotency_key: str | None = None) -> C
     existing = _existing_order_for_idempotency_key(idempotency_key)
     if existing:
         return existing
+
+    check_transaction_pin(user, pin)
 
     with transaction.atomic():
         quote = get_locked_quote(user, quote_id, QuoteType.SELL)
@@ -471,13 +480,17 @@ def _execute_quidax_swap(order: CryptoOrder) -> CryptoOrder:
     return order
 
 
-def place_swap_order(user, *, quote_id, idempotency_key: str | None = None) -> CryptoOrder:
+def place_swap_order(
+    user, *, quote_id, pin: str, idempotency_key: str | None = None
+) -> CryptoOrder:
     """Swap requires the full source-coin balance up front — no
     waiting_deposit fallback like sell; if reserving comes up short, the
     order just fails immediately."""
     existing = _existing_order_for_idempotency_key(idempotency_key)
     if existing:
         return existing
+
+    check_transaction_pin(user, pin)
 
     with transaction.atomic():
         quote = get_locked_quote(user, quote_id, QuoteType.SWAP)

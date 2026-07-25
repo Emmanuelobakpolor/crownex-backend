@@ -14,7 +14,6 @@ from decimal import ROUND_DOWN, Decimal
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import Sum
 from django.utils import timezone
 
 from . import quidax
@@ -30,6 +29,7 @@ from .services import (
     MIN_ORDER_NOTIONAL_NGN,
     CryptoServiceError,
     _validate_coin,
+    check_transaction_pin,
     compute_fee_ngn,
     credit_crypto_available,
     debit_reserved_crypto,
@@ -174,39 +174,20 @@ def _execute_quidax_withdrawal(withdrawal: CryptoWithdrawal) -> CryptoWithdrawal
     return withdrawal
 
 
-def request_withdrawal(
-    user,
-    *,
-    coin: str,
-    amount: Decimal,
-    address: str,
-    network: str | None = None,
-    idempotency_key: str | None = None,
-) -> CryptoWithdrawal:
-    existing = _existing_withdrawal_for_idempotency_key(idempotency_key)
-    if existing:
-        return existing
-
+def estimate_withdrawal(*, coin: str, amount: Decimal) -> dict:
+    """Read-only fee/net-amount preview — no reservation, no PIN, no side
+    effects. Lets a client show an accurate summary before the user
+    confirms, since (unlike buy/sell/swap) withdrawals have no quote to
+    lock the numbers in advance."""
     coin = _validate_coin(coin)
     if amount is None or amount <= 0:
         raise CryptoServiceError('Amount must be greater than zero.', code='invalid_amount')
-
-    address = address.strip()
-    network = (network or '').upper()
-    _validate_address(coin, network, address)
 
     rate = get_coin_rate_ngn(coin)
     notional_ngn = (rate * amount).quantize(Decimal('0.01'))
     if notional_ngn < MIN_ORDER_NOTIONAL_NGN:
         raise CryptoServiceError(
             f'Minimum withdrawal amount is ₦{MIN_ORDER_NOTIONAL_NGN}.', code='amount_too_low'
-        )
-
-    daily_limit = Decimal(str(settings.CRYPTO_WITHDRAW_DAILY_LIMIT_NGN))
-    if _daily_withdrawn_ngn(user) + notional_ngn > daily_limit:
-        raise CryptoServiceError(
-            f'This would exceed your daily withdrawal limit of ₦{daily_limit}.',
-            code='daily_limit_exceeded',
         )
 
     fee_ngn = compute_fee_ngn(FeeType.WITHDRAW, notional_ngn)
@@ -218,6 +199,52 @@ def request_withdrawal(
     net_amount = amount - fee_coin
     if net_amount <= 0:
         raise CryptoServiceError('Amount too small after fees.', code='amount_too_low')
+
+    return {
+        'coin': coin,
+        'amount': str(amount),
+        'rate_ngn': str(rate),
+        'notional_ngn': str(notional_ngn),
+        'fee_coin': str(fee_coin),
+        'fee_ngn': str(fee_ngn),
+        'net_amount': str(net_amount),
+    }
+
+
+def request_withdrawal(
+    user,
+    *,
+    coin: str,
+    amount: Decimal,
+    address: str,
+    pin: str,
+    network: str | None = None,
+    idempotency_key: str | None = None,
+) -> CryptoWithdrawal:
+    existing = _existing_withdrawal_for_idempotency_key(idempotency_key)
+    if existing:
+        return existing
+
+    check_transaction_pin(user, pin)
+
+    address = address.strip()
+    network = (network or '').upper()
+
+    estimate = estimate_withdrawal(coin=coin, amount=amount)
+    coin = estimate['coin']
+    _validate_address(coin, network, address)
+
+    rate = Decimal(estimate['rate_ngn'])
+    notional_ngn = Decimal(estimate['notional_ngn'])
+    fee_coin = Decimal(estimate['fee_coin'])
+    net_amount = Decimal(estimate['net_amount'])
+
+    daily_limit = Decimal(str(settings.CRYPTO_WITHDRAW_DAILY_LIMIT_NGN))
+    if _daily_withdrawn_ngn(user) + notional_ngn > daily_limit:
+        raise CryptoServiceError(
+            f'This would exceed your daily withdrawal limit of ₦{daily_limit}.',
+            code='daily_limit_exceeded',
+        )
 
     reserve_crypto(user, coin, amount)  # raises insufficient_balance
 

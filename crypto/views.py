@@ -26,6 +26,7 @@ from .serializers import (
     OrderRequestSerializer,
     PaymentProofSerializer,
     VerifyBuyPaymentSerializer,
+    WithdrawEstimateSerializer,
     WithdrawRequestSerializer,
 )
 
@@ -112,6 +113,7 @@ class BuyOrderView(APIView):
             order = orders.place_buy_order(
                 request.user,
                 quote_id=data['quote_id'],
+                pin=data['pin'],
                 idempotency_key=data.get('idempotency_key') or None,
             )
         except services.CryptoServiceError as exc:
@@ -129,6 +131,7 @@ class BuyOrderView(APIView):
                     'amount': str(order.total_ngn),
                     'customer': {
                         'email': request.user.email,
+                        'phone': request.user.phone or '',
                         'name': request.user.full_name or request.user.email,
                     },
                 }
@@ -192,6 +195,7 @@ class SellOrderView(APIView):
             order = orders.place_sell_order(
                 request.user,
                 quote_id=data['quote_id'],
+                pin=data['pin'],
                 idempotency_key=data.get('idempotency_key') or None,
             )
         except services.CryptoServiceError as exc:
@@ -231,6 +235,7 @@ class SwapOrderView(APIView):
             order = orders.place_swap_order(
                 request.user,
                 quote_id=data['quote_id'],
+                pin=data['pin'],
                 idempotency_key=data.get('idempotency_key') or None,
             )
         except services.CryptoServiceError as exc:
@@ -316,6 +321,7 @@ class WithdrawView(APIView):
                 coin=data['coin'],
                 amount=data['amount'],
                 address=data['address'],
+                pin=data['pin'],
                 network=data.get('network') or None,
                 idempotency_key=data.get('idempotency_key') or None,
             )
@@ -323,6 +329,24 @@ class WithdrawView(APIView):
             return _error_response(exc)
 
         return Response(CryptoWithdrawalSerializer(withdrawal).data, status=status.HTTP_201_CREATED)
+
+
+class WithdrawEstimateView(APIView):
+    """GET /api/crypto/withdraw/estimate/?coin=&amount= — fee/net-amount
+    preview with no side effects, for showing an accurate summary before
+    the user confirms a withdrawal."""
+
+    def get(self, request):
+        serializer = WithdrawEstimateSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            estimate = withdrawals.estimate_withdrawal(coin=data['coin'], amount=data['amount'])
+        except services.CryptoServiceError as exc:
+            return _error_response(exc)
+
+        return Response(estimate)
 
 
 class WithdrawalHistoryView(APIView):

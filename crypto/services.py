@@ -38,6 +38,17 @@ class CryptoServiceError(Exception):
         self.status = status
 
 
+def check_transaction_pin(user, pin: str) -> None:
+    """Same guard as vtu.services / giftcards.services — every crypto action
+    that moves money requires the user's 4-digit transaction PIN."""
+    if not user.has_transaction_pin:
+        raise CryptoServiceError(
+            'Set a transaction PIN before trading.', code='pin_not_set'
+        )
+    if not user.check_transaction_pin(pin):
+        raise CryptoServiceError('Incorrect transaction PIN.', code='invalid_pin', status=401)
+
+
 # Server-side coin catalogue — the client never hardcodes markets. Each
 # entry maps our symbol to how its NGN price is resolved: a direct NGN
 # market where Quidax has one, otherwise via its USDT market * usdtngn.

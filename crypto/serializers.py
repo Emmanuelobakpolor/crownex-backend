@@ -126,6 +126,7 @@ class OrderRequestSerializer(serializers.Serializer):
     used for buy, sell, and swap alike."""
 
     quote_id = serializers.UUIDField()
+    pin = serializers.CharField(min_length=4, max_length=4)
     idempotency_key = serializers.CharField(max_length=64, required=False, allow_blank=True)
 
 
@@ -173,4 +174,10 @@ class WithdrawRequestSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=24, decimal_places=8, min_value=Decimal('0'))
     address = serializers.CharField(max_length=255)
     network = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    pin = serializers.CharField(min_length=4, max_length=4)
     idempotency_key = serializers.CharField(max_length=64, required=False, allow_blank=True)
+
+
+class WithdrawEstimateSerializer(serializers.Serializer):
+    coin = serializers.CharField(max_length=10)
+    amount = serializers.DecimalField(max_digits=24, decimal_places=8, min_value=Decimal('0'))
