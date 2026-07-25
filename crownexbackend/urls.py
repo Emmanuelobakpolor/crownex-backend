@@ -16,6 +16,7 @@ urlpatterns = [
     path('api/wallet/', include('wallet.urls')),
     path('api/vtu/', include('vtu.urls')),
     path('api/giftcards/', include('giftcards.urls')),
+    path('api/admin/', include('adminpanel.urls')),
 ]
 
 if settings.DEBUG:

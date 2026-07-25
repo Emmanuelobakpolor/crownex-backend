@@ -71,6 +71,7 @@ INSTALLED_APPS = [
     'wallet',
     'vtu',
     'giftcards',
+    'adminpanel',
 ]
 
 MIDDLEWARE = [
@@ -218,10 +219,16 @@ SIMPLE_JWT = {
 
 
 # CORS — wide open in dev; explicit allowlist required in production
-# (mobile clients aren't subject to CORS, this mainly matters for Flutter web).
+# (mobile clients aren't subject to CORS, this mainly matters for Flutter web
+# and the admin dashboard). Defaults to the deployed admin panel so it works
+# out of the box; override CORS_ALLOWED_ORIGINS to add more.
 CORS_ALLOW_ALL_ORIGINS = DEBUG
 CORS_ALLOWED_ORIGINS = [
-    o.strip() for o in os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',') if o.strip()
+    o.strip()
+    for o in os.environ.get(
+        'CORS_ALLOWED_ORIGINS', 'https://crownex-admin.vercel.app'
+    ).split(',')
+    if o.strip()
 ]
 CORS_ALLOW_CREDENTIALS = True
 
@@ -238,6 +245,13 @@ EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() == 'true'
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', 'apikey')  # SendGrid SMTP always uses literal 'apikey'
 EMAIL_HOST_PASSWORD = os.environ.get('SENDGRID_API_KEY', '')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'CrownEx <noreply@crownex.app>')
+
+
+# Admin panel — shared secret required by POST /api/admin/create/ to
+# bootstrap the first admin account via Postman (see adminpanel/views.py).
+# Set a long random value in production; the endpoint refuses to run without
+# one configured.
+ADMIN_REGISTRATION_SECRET = os.environ.get('ADMIN_REGISTRATION_SECRET', '')
 
 
 # OTP settings
