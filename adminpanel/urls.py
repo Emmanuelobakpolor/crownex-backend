@@ -13,4 +13,30 @@ urlpatterns = [
         name='admin-transactions',
     ),
     path('profile/', views.AdminProfileView.as_view(), name='admin-profile'),
+    path('fees/', views.AdminCryptoFeeListView.as_view(), name='admin-crypto-fees'),
+    path(
+        'fees/<int:pk>/',
+        views.AdminCryptoFeeUpdateView.as_view(),
+        name='admin-crypto-fee-update',
+    ),
+    path(
+        'crypto/orders/',
+        views.AdminCryptoOrderListView.as_view(),
+        name='admin-crypto-orders',
+    ),
+    path(
+        'crypto/orders/<str:reference>/',
+        views.AdminCryptoOrderActionView.as_view(),
+        name='admin-crypto-order-action',
+    ),
+    path(
+        'crypto/withdrawals/',
+        views.AdminCryptoWithdrawalListView.as_view(),
+        name='admin-crypto-withdrawals',
+    ),
+    path(
+        'crypto/withdrawals/<str:reference>/',
+        views.AdminCryptoWithdrawalActionView.as_view(),
+        name='admin-crypto-withdrawal-action',
+    ),
 ]

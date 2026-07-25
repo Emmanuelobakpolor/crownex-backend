@@ -71,6 +71,7 @@ INSTALLED_APPS = [
     'wallet',
     'vtu',
     'giftcards',
+    'crypto',
     'adminpanel',
 ]
 
@@ -299,3 +300,34 @@ try:
 except InvalidOperation:
     RELOADLY_NGN_PER_USD = Decimal('1700')
 RELOADLY_WEBHOOK_SECRET = os.environ.get('RELOADLY_WEBHOOK_SECRET', '')
+
+
+# Quidax — crypto trading (crypto app): market execution, sub-account
+# deposit addresses, on-chain withdrawals, and webhooks. Quidax is never
+# the source of truth for a user's balance — that's CryptoWallet in our
+# own DB (see crypto/models.py); Quidax is only used to move money.
+# QUIDAX_USER_ID='me' trades on the master/business account by default.
+QUIDAX_SECRET_KEY = os.environ.get('QUIDAX_SECRET_KEY', '')
+QUIDAX_USER_ID = os.environ.get('QUIDAX_USER_ID', 'me')
+QUIDAX_WEBHOOK_SECRET = os.environ.get('QUIDAX_WEBHOOK_SECRET', '')
+
+# App-controlled USD->NGN rate used only to convert each fee row's flat_usd
+# into NGN at quote time — independent of RELOADLY_NGN_PER_USD above.
+try:
+    NGN_PER_USD = Decimal(os.environ.get('NGN_PER_USD') or '1600')
+except InvalidOperation:
+    NGN_PER_USD = Decimal('1600')
+
+try:
+    CRYPTO_WITHDRAW_DAILY_LIMIT_NGN = Decimal(
+        os.environ.get('CRYPTO_WITHDRAW_DAILY_LIMIT_NGN') or '2000000'
+    )
+except InvalidOperation:
+    CRYPTO_WITHDRAW_DAILY_LIMIT_NGN = Decimal('2000000')
+
+# Bank-transfer fallback for crypto buys when a user has insufficient
+# wallet balance and Flutterwave isn't configured. Leave unset to disable
+# this path entirely — buy orders will just report bank_details as null.
+CRYPTO_BANK_ACCOUNT_NAME = os.environ.get('CRYPTO_BANK_ACCOUNT_NAME', '')
+CRYPTO_BANK_ACCOUNT_NUMBER = os.environ.get('CRYPTO_BANK_ACCOUNT_NUMBER', '')
+CRYPTO_BANK_NAME = os.environ.get('CRYPTO_BANK_NAME', '')

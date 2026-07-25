@@ -7,15 +7,25 @@ authenticated staff account (IsAdminUser -> request.user.is_staff).
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.core.paginator import Paginator
+from django.db.models import Q
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
 from accounts.services import issue_tokens
+from crypto import orders as crypto_orders
+from crypto import services as crypto_services
+from crypto import withdrawals as crypto_withdrawals
+from crypto.models import CryptoFeeSettings, CryptoOrder, CryptoWithdrawal
+from crypto.serializers import CryptoFeeSettingsSerializer, CryptoFeeSettingsUpdateSerializer
 
 from . import services
 from .serializers import (
+    AdminCryptoOrderActionSerializer,
+    AdminCryptoOrderSerializer,
+    AdminCryptoWithdrawalActionSerializer,
+    AdminCryptoWithdrawalSerializer,
     AdminLoginSerializer,
     AdminProfileUpdateSerializer,
     CreateAdminSerializer,
@@ -214,3 +224,175 @@ class AdminProfileView(APIView):
                 'full_name': user.full_name,
             }
         )
+
+
+class AdminCryptoFeeListView(APIView):
+    """GET /api/admin/fees/ — all crypto fee rows (auto-creates buy/sell/swap/withdraw)."""
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        rows = crypto_services.get_all_fee_settings()
+        return Response(CryptoFeeSettingsSerializer(rows, many=True).data)
+
+
+class AdminCryptoFeeUpdateView(APIView):
+    """PATCH /api/admin/fees/<id>/ — update flat_usd, percent, is_active.
+
+    Only affects quotes created after the save — any quote already locked
+    keeps its frozen fee (see CryptoQuote in a later phase).
+    """
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def patch(self, request, pk):
+        try:
+            row = CryptoFeeSettings.objects.get(pk=pk)
+        except CryptoFeeSettings.DoesNotExist:
+            return Response({'detail': 'Fee setting not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = CryptoFeeSettingsUpdateSerializer(row, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        return Response(CryptoFeeSettingsSerializer(row).data)
+
+
+class AdminCryptoOrderListView(APIView):
+    """GET /api/admin/crypto/orders/?status=&type=&search=&page=&page_size="""
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        qs = CryptoOrder.objects.select_related('user').prefetch_related('logs').order_by('-created_at')
+
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        type_filter = request.query_params.get('type')
+        if type_filter:
+            qs = qs.filter(order_type=type_filter)
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(Q(reference__icontains=search) | Q(user__email__icontains=search))
+
+        page_size = min(int(request.query_params.get('page_size', 25) or 25), 100)
+        page = request.query_params.get('page', 1)
+        paginator = Paginator(qs, page_size)
+        page_obj = paginator.get_page(page)
+
+        return Response(
+            {
+                'count': paginator.count,
+                'page': page_obj.number,
+                'page_size': page_size,
+                'num_pages': paginator.num_pages,
+                'results': AdminCryptoOrderSerializer(
+                    page_obj.object_list, many=True, context={'request': request}
+                ).data,
+            }
+        )
+
+
+class AdminCryptoOrderActionView(APIView):
+    """POST /api/admin/crypto/orders/<reference>/ — { action, note? }
+
+    action is one of:
+      approve         bank-transfer buy with proof uploaded -> execute
+      reject          cancel a stuck pending_payment/waiting_deposit order
+      confirm_deposit waiting_deposit sell -> re-attempt (webhook missed)
+      retry           re-attempt a failed buy
+    """
+
+    permission_classes = [permissions.IsAdminUser]
+
+    ACTIONS = {
+        'approve': crypto_orders.admin_approve_buy,
+        'reject': crypto_orders.admin_reject_order,
+        'confirm_deposit': crypto_orders.admin_confirm_sell_deposit,
+        'retry': crypto_orders.admin_retry_buy,
+    }
+
+    def post(self, request, reference):
+        try:
+            order = CryptoOrder.objects.get(reference=reference)
+        except CryptoOrder.DoesNotExist:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = AdminCryptoOrderActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            order = self.ACTIONS[data['action']](order, data['note'])
+        except crypto_services.CryptoServiceError as exc:
+            return Response({'detail': exc.message, 'code': exc.code}, status=exc.status)
+
+        return Response(AdminCryptoOrderSerializer(order, context={'request': request}).data)
+
+
+class AdminCryptoWithdrawalListView(APIView):
+    """GET /api/admin/crypto/withdrawals/?status=&search=&page=&page_size="""
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        qs = (
+            CryptoWithdrawal.objects.select_related('user')
+            .prefetch_related('logs')
+            .order_by('-created_at')
+        )
+
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(Q(reference__icontains=search) | Q(user__email__icontains=search))
+
+        page_size = min(int(request.query_params.get('page_size', 25) or 25), 100)
+        page = request.query_params.get('page', 1)
+        paginator = Paginator(qs, page_size)
+        page_obj = paginator.get_page(page)
+
+        return Response(
+            {
+                'count': paginator.count,
+                'page': page_obj.number,
+                'page_size': page_size,
+                'num_pages': paginator.num_pages,
+                'results': AdminCryptoWithdrawalSerializer(page_obj.object_list, many=True).data,
+            }
+        )
+
+
+class AdminCryptoWithdrawalActionView(APIView):
+    """POST /api/admin/crypto/withdrawals/<reference>/ — { action, tx_id?, note? }
+
+    action is one of: complete, reject — manual recovery for when a
+    withdraw.successful/withdraw.rejected webhook never arrived.
+    """
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def post(self, request, reference):
+        try:
+            withdrawal = CryptoWithdrawal.objects.get(reference=reference)
+        except CryptoWithdrawal.DoesNotExist:
+            return Response({'detail': 'Withdrawal not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = AdminCryptoWithdrawalActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            if data['action'] == 'complete':
+                withdrawal = crypto_withdrawals.admin_complete_withdrawal(
+                    withdrawal, data['tx_id'], data['note']
+                )
+            else:
+                withdrawal = crypto_withdrawals.admin_reject_withdrawal(withdrawal, data['note'])
+        except crypto_services.CryptoServiceError as exc:
+            return Response({'detail': exc.message, 'code': exc.code}, status=exc.status)
+
+        return Response(AdminCryptoWithdrawalSerializer(withdrawal).data)
