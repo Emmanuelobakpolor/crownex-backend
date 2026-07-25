@@ -52,11 +52,43 @@ def check_transaction_pin(user, pin: str) -> None:
 # Server-side coin catalogue — the client never hardcodes markets. Each
 # entry maps our symbol to how its NGN price is resolved: a direct NGN
 # market where Quidax has one, otherwise via its USDT market * usdtngn.
+#
+# Curated from Quidax's real GET /markets/tickers response (110 markets
+# total) — deliberately excludes memecoin/low-liquidity listings (e.g.
+# babydogeusdt, nochillusdt, magatrumpusdt) that showed up in that response
+# but aren't appropriate to offer trading in on a mainstream fintech app.
+# Extend this dict (and withdrawals.py's _ADDRESS_PATTERNS, and the
+# Flutter-side kSupportedCryptoCoins/kCryptoCoinNetworks) together — all
+# three need to agree on what's actually supported.
 SUPPORTED_COINS: dict[str, dict] = {
+    # Direct NGN markets
     'btc': {'name': 'Bitcoin', 'market': 'btcngn', 'color': '#F7931A'},
     'eth': {'name': 'Ethereum', 'market': 'ethngn', 'color': '#627EEA'},
     'usdt': {'name': 'Tether', 'market': 'usdtngn', 'color': '#26A17B'},
-    'sol': {'name': 'Solana', 'market': 'solusdt', 'via_usdt': True, 'color': '#9945FF'},
+    'usdc': {'name': 'USD Coin', 'market': 'usdcngn', 'color': '#2775CA'},
+    'sol': {'name': 'Solana', 'market': 'solngn', 'color': '#9945FF'},
+    'xrp': {'name': 'XRP', 'market': 'xrpngn', 'color': '#23292F'},
+    'ltc': {'name': 'Litecoin', 'market': 'ltcngn', 'color': '#345D9D'},
+    'trx': {'name': 'TRON', 'market': 'trxngn', 'color': '#EF0027'},
+    'dash': {'name': 'Dash', 'market': 'dashngn', 'color': '#008CE7'},
+    # Via USDT bridge (no direct NGN market on Quidax)
+    'bnb': {'name': 'BNB', 'market': 'bnbusdt', 'via_usdt': True, 'color': '#F3BA2F'},
+    'ada': {'name': 'Cardano', 'market': 'adausdt', 'via_usdt': True, 'color': '#0033AD'},
+    'dot': {'name': 'Polkadot', 'market': 'dotusdt', 'via_usdt': True, 'color': '#E6007A'},
+    'link': {'name': 'Chainlink', 'market': 'linkusdt', 'via_usdt': True, 'color': '#2A5ADA'},
+    'doge': {'name': 'Dogecoin', 'market': 'dogeusdt', 'via_usdt': True, 'color': '#C2A633'},
+    'bch': {'name': 'Bitcoin Cash', 'market': 'bchusdt', 'via_usdt': True, 'color': '#8DC351'},
+    'etc': {'name': 'Ethereum Classic', 'market': 'etcusdt', 'via_usdt': True, 'color': '#328332'},
+    'xlm': {'name': 'Stellar', 'market': 'xlmusdt', 'via_usdt': True, 'color': '#14B6E7'},
+    'near': {'name': 'NEAR Protocol', 'market': 'nearusdt', 'via_usdt': True, 'color': '#000000'},
+    'sui': {'name': 'Sui', 'market': 'suiusdt', 'via_usdt': True, 'color': '#4DA2FF'},
+    'ton': {'name': 'Toncoin', 'market': 'tonusdt', 'via_usdt': True, 'color': '#0088CC'},
+    'fil': {'name': 'Filecoin', 'market': 'filusdt', 'via_usdt': True, 'color': '#0090FF'},
+    'algo': {'name': 'Algorand', 'market': 'algousdt', 'via_usdt': True, 'color': '#000000'},
+    'sand': {'name': 'The Sandbox', 'market': 'sandusdt', 'via_usdt': True, 'color': '#00ADEF'},
+    'shib': {'name': 'Shiba Inu', 'market': 'shibusdt', 'via_usdt': True, 'color': '#FFA409'},
+    'aave': {'name': 'Aave', 'market': 'aaveusdt', 'via_usdt': True, 'color': '#B6509E'},
+    'pol': {'name': 'Polygon', 'market': 'polusdt', 'via_usdt': True, 'color': '#8247E5'},
 }
 
 

@@ -271,6 +271,24 @@ class DepositAddressView(APIView):
         return Response(DepositAddressSerializer(address).data)
 
 
+class EnsureAccountView(APIView):
+    """POST /api/crypto/account/ensure/ — best-effort Quidax sub-account
+    warm-up. Meant to be called the instant a user opens the crypto
+    section of the app (fire-and-forget, no need to await it) so the
+    sub-account already exists by the time they actually request a
+    deposit address. Always answers 200 — a failure here is logged
+    server-side and retried by the normal lazy path, not something the
+    UI needs to handle as an error.
+    """
+
+    def post(self, request):
+        try:
+            deposits.get_or_create_sub_account(request.user)
+            return Response({'ready': True})
+        except services.CryptoServiceError:
+            return Response({'ready': False})
+
+
 class QuidaxWebhookView(APIView):
     """POST /api/crypto/webhook/quidax/ — HMAC-SHA512(raw_body, secret)
     verified against X-Quidax-Signature. Always answers 200 for events we

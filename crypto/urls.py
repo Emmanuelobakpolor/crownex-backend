@@ -23,6 +23,7 @@ urlpatterns = [
     ),
     path('orders/swap/', views.SwapOrderView.as_view(), name='crypto-swap'),
     path('address/<str:coin>/', views.DepositAddressView.as_view(), name='crypto-address'),
+    path('account/ensure/', views.EnsureAccountView.as_view(), name='crypto-account-ensure'),
     path('webhook/quidax/', views.QuidaxWebhookView.as_view(), name='crypto-webhook'),
     path('withdraw/', views.WithdrawView.as_view(), name='crypto-withdraw'),
     path(

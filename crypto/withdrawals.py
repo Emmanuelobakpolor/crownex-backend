@@ -40,13 +40,40 @@ from .services import (
 
 # Loose but real per-(coin, network) address shape checks — enough to catch
 # obvious typos before ever calling Quidax; Quidax remains the final
-# authority on whether an address is actually valid.
+# authority on whether an address is actually valid. Coins not listed here
+# (e.g. ton, ada's older Byron format) skip client-side validation and rely
+# on that backstop instead of risking a wrong regex blocking a real address.
+_EVM_ADDRESS = re.compile(r'^0x[a-fA-F0-9]{40}$')
+_TRON_ADDRESS = re.compile(r'^T[a-zA-Z0-9]{33}$')
+
 _ADDRESS_PATTERNS: dict[tuple[str, str], re.Pattern] = {
     ('btc', ''): re.compile(r'^(bc1[a-z0-9]{25,59}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$'),
-    ('eth', ''): re.compile(r'^0x[a-fA-F0-9]{40}$'),
-    ('usdt', 'ERC20'): re.compile(r'^0x[a-fA-F0-9]{40}$'),
-    ('usdt', 'TRC20'): re.compile(r'^T[a-zA-Z0-9]{33}$'),
+    ('eth', ''): _EVM_ADDRESS,
+    ('usdt', 'ERC20'): _EVM_ADDRESS,
+    ('usdt', 'TRC20'): _TRON_ADDRESS,
+    ('usdc', 'ERC20'): _EVM_ADDRESS,
+    ('usdc', 'TRC20'): _TRON_ADDRESS,
     ('sol', ''): re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$'),
+    ('trx', ''): _TRON_ADDRESS,
+    ('ltc', ''): re.compile(r'^(ltc1[a-z0-9]{25,59}|[LM3][a-km-zA-HJ-NP-Z1-9]{25,34})$'),
+    ('dash', ''): re.compile(r'^X[a-km-zA-HJ-NP-Z1-9]{33}$'),
+    ('doge', ''): re.compile(r'^D[a-km-zA-HJ-NP-Z1-9]{33}$'),
+    ('bch', ''): re.compile(r'^((bitcoincash:)?[qp][a-z0-9]{41}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$'),
+    ('bnb', ''): _EVM_ADDRESS,  # BNB Smart Chain (BEP20) — same shape as ETH
+    ('link', ''): _EVM_ADDRESS,  # ERC20 token
+    ('etc', ''): _EVM_ADDRESS,
+    ('sand', ''): _EVM_ADDRESS,  # ERC20 token
+    ('shib', ''): _EVM_ADDRESS,  # ERC20 token
+    ('aave', ''): _EVM_ADDRESS,  # ERC20 token
+    ('pol', ''): _EVM_ADDRESS,  # Polygon PoS — EVM-compatible
+    ('xrp', ''): re.compile(r'^r[a-km-zA-HJ-NP-Z1-9]{24,34}$'),
+    ('ada', ''): re.compile(r'^addr1[a-z0-9]{20,103}$'),
+    ('dot', ''): re.compile(r'^1[a-km-zA-HJ-NP-Z1-9]{46,47}$'),
+    ('xlm', ''): re.compile(r'^G[A-Z2-7]{55}$'),
+    ('near', ''): re.compile(r'^([a-f0-9]{64}|[a-z0-9_\-.]{2,64}\.near)$'),
+    ('sui', ''): re.compile(r'^0x[a-fA-F0-9]{64}$'),
+    ('fil', ''): re.compile(r'^f[1234][a-zA-Z0-9]{20,86}$'),
+    ('algo', ''): re.compile(r'^[A-Z2-7]{58}$'),
 }
 
 
