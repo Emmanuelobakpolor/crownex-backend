@@ -72,6 +72,7 @@ INSTALLED_APPS = [
     'vtu',
     'giftcards',
     'crypto',
+    'kyc',
     'adminpanel',
 ]
 
@@ -340,6 +341,15 @@ RELOADLY_WEBHOOK_SECRET = os.environ.get('RELOADLY_WEBHOOK_SECRET', '')
 QUIDAX_SECRET_KEY = os.environ.get('QUIDAX_SECRET_KEY', '')
 QUIDAX_USER_ID = os.environ.get('QUIDAX_USER_ID', 'me')
 QUIDAX_WEBHOOK_SECRET = os.environ.get('QUIDAX_WEBHOOK_SECRET', '')
+
+# Dojah — identity verification (KYC) for virtual card eligibility.
+# Secret key is server-only; never sent to the Flutter app. Sandbox first
+# (sandbox.dojah.io, test NIN 70123456789), switch DOJAH_BASE_URL to
+# api.dojah.io + live keys after compliance activation on the dashboard.
+DOJAH_APP_ID = os.environ.get('DOJAH_APP_ID', '')
+DOJAH_SECRET_KEY = os.environ.get('DOJAH_SECRET_KEY', '')
+DOJAH_BASE_URL = os.environ.get('DOJAH_BASE_URL', 'https://sandbox.dojah.io')
+
 
 # App-controlled USD->NGN rate used only to convert each fee row's flat_usd
 # into NGN at quote time — independent of RELOADLY_NGN_PER_USD above.

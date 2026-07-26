@@ -6,6 +6,7 @@ from rest_framework import serializers
 
 from accounts.models import User
 from crypto.models import CryptoOrder, CryptoOrderLog, CryptoWithdrawal, CryptoWithdrawalLog
+from kyc.models import KycLog, KycVerification
 
 
 class CreateAdminSerializer(serializers.Serializer):
@@ -155,4 +156,59 @@ class AdminCryptoWithdrawalSerializer(serializers.ModelSerializer):
 class AdminCryptoWithdrawalActionSerializer(serializers.Serializer):
     action = serializers.ChoiceField(choices=['complete', 'reject'])
     tx_id = serializers.CharField(required=False, allow_blank=True, default='')
+    note = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class AdminKycLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = KycLog
+        fields = ['event', 'detail', 'created_at']
+        read_only_fields = fields
+
+
+class AdminKycVerificationSerializer(serializers.ModelSerializer):
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+    selfie = serializers.SerializerMethodField()
+    id_document = serializers.SerializerMethodField()
+    logs = AdminKycLogSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = KycVerification
+        fields = [
+            'id',
+            'user_email',
+            'id_type',
+            'id_number',
+            'full_name',
+            'date_of_birth',
+            'address',
+            'selfie',
+            'id_document',
+            'dojah_reference_id',
+            'match_score',
+            'status',
+            'reviewer_note',
+            'created_at',
+            'updated_at',
+            'logs',
+        ]
+        read_only_fields = fields
+
+    def get_selfie(self, obj: KycVerification):
+        if not obj.selfie:
+            return None
+        request = self.context.get('request')
+        url = obj.selfie.url
+        return request.build_absolute_uri(url) if request else url
+
+    def get_id_document(self, obj: KycVerification):
+        if not obj.id_document:
+            return None
+        request = self.context.get('request')
+        url = obj.id_document.url
+        return request.build_absolute_uri(url) if request else url
+
+
+class AdminKycActionSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=['approve', 'reject'])
     note = serializers.CharField(required=False, allow_blank=True, default='')

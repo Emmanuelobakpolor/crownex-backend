@@ -40,4 +40,6 @@ urlpatterns = [
         views.AdminCryptoWithdrawalActionView.as_view(),
         name='admin-crypto-withdrawal-action',
     ),
+    path('kyc/', views.AdminKycListView.as_view(), name='admin-kyc'),
+    path('kyc/<int:pk>/', views.AdminKycActionView.as_view(), name='admin-kyc-action'),
 ]

@@ -17,6 +17,7 @@ urlpatterns = [
     path('api/vtu/', include('vtu.urls')),
     path('api/giftcards/', include('giftcards.urls')),
     path('api/crypto/', include('crypto.urls')),
+    path('api/kyc/', include('kyc.urls')),
     path('api/admin/', include('adminpanel.urls')),
 ]
 

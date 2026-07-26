@@ -19,6 +19,8 @@ from crypto import services as crypto_services
 from crypto import withdrawals as crypto_withdrawals
 from crypto.models import CryptoFeeSettings, CryptoOrder, CryptoWithdrawal
 from crypto.serializers import CryptoFeeSettingsSerializer, CryptoFeeSettingsUpdateSerializer
+from kyc import services as kyc_services
+from kyc.models import KycVerification
 
 from . import services
 from .serializers import (
@@ -26,6 +28,8 @@ from .serializers import (
     AdminCryptoOrderSerializer,
     AdminCryptoWithdrawalActionSerializer,
     AdminCryptoWithdrawalSerializer,
+    AdminKycActionSerializer,
+    AdminKycVerificationSerializer,
     AdminLoginSerializer,
     AdminProfileUpdateSerializer,
     CreateAdminSerializer,
@@ -412,3 +416,71 @@ class AdminCryptoWithdrawalActionView(APIView):
             return Response({'detail': exc.message, 'code': exc.code}, status=exc.status)
 
         return Response(AdminCryptoWithdrawalSerializer(withdrawal).data)
+
+
+class AdminKycListView(APIView):
+    """GET /api/admin/kyc/?status=&search=&page=&page_size="""
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        qs = KycVerification.objects.select_related('user').prefetch_related('logs').order_by(
+            '-created_at'
+        )
+
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(Q(id_number__icontains=search) | Q(user__email__icontains=search))
+
+        page_size = min(int(request.query_params.get('page_size', 25) or 25), 100)
+        page = request.query_params.get('page', 1)
+        paginator = Paginator(qs, page_size)
+        page_obj = paginator.get_page(page)
+
+        return Response(
+            {
+                'count': paginator.count,
+                'page': page_obj.number,
+                'page_size': page_size,
+                'num_pages': paginator.num_pages,
+                'results': AdminKycVerificationSerializer(
+                    page_obj.object_list, many=True, context={'request': request}
+                ).data,
+            }
+        )
+
+
+class AdminKycActionView(APIView):
+    """POST /api/admin/kyc/<id>/ — { action, note? }
+
+    action is one of: approve, reject — manual override for verifications
+    sitting in `review` (match score in the 70-89 gray zone) or to correct
+    an auto-decided outcome.
+    """
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def post(self, request, pk):
+        try:
+            verification = KycVerification.objects.get(pk=pk)
+        except KycVerification.DoesNotExist:
+            return Response({'detail': 'Verification not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = AdminKycActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            if data['action'] == 'approve':
+                verification = kyc_services.admin_approve(verification, data['note'])
+            else:
+                verification = kyc_services.admin_reject(verification, data['note'])
+        except kyc_services.KycServiceError as exc:
+            return Response({'detail': exc.message, 'code': exc.code}, status=exc.status)
+
+        return Response(
+            AdminKycVerificationSerializer(verification, context={'request': request}).data
+        )
