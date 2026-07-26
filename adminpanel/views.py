@@ -155,9 +155,25 @@ class AdminUserListView(APIView):
                 'page': page_obj.number,
                 'page_size': page_size,
                 'num_pages': paginator.num_pages,
-                'results': [services.serialize_user(u) for u in page_obj.object_list],
+                'results': [
+                    services.serialize_user(u, request=request) for u in page_obj.object_list
+                ],
             }
         )
+
+
+class AdminUserDetailView(APIView):
+    """GET /api/admin/users/<id>/ — full detail for the user-detail panel."""
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request, pk):
+        try:
+            user = services.get_users().get(pk=pk)
+        except User.DoesNotExist:
+            return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(services.serialize_user(user, request=request))
 
 
 class AdminTransactionListView(APIView):

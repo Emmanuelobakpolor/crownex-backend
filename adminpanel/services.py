@@ -74,7 +74,14 @@ def get_overview_stats() -> dict:
     }
 
 
-def serialize_user(user: User) -> dict:
+def _profile_picture_url(user: User, request=None) -> str | None:
+    if not user.profile_picture:
+        return None
+    url = user.profile_picture.url
+    return request.build_absolute_uri(url) if request is not None else url
+
+
+def serialize_user(user: User, request=None) -> dict:
     try:
         balance = user.wallet.ngn_balance
     except Exception:
@@ -85,6 +92,7 @@ def serialize_user(user: User) -> dict:
         'name': user.full_name or user.email.split('@')[0],
         'email': user.email,
         'phone': user.phone,
+        'profile_picture': _profile_picture_url(user, request),
         'balance_ngn': str(balance),
         'status': 'Active' if user.is_active else 'Inactive',
         'is_verified': user.is_verified,

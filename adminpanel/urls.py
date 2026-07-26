@@ -7,6 +7,7 @@ urlpatterns = [
     path('login/', views.AdminLoginView.as_view(), name='admin-login'),
     path('overview/', views.AdminOverviewView.as_view(), name='admin-overview'),
     path('users/', views.AdminUserListView.as_view(), name='admin-users'),
+    path('users/<int:pk>/', views.AdminUserDetailView.as_view(), name='admin-user-detail'),
     path(
         'transactions/',
         views.AdminTransactionListView.as_view(),
