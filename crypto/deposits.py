@@ -27,8 +27,8 @@ from .services import CryptoServiceError, _validate_coin, credit_crypto_availabl
 
 logger = logging.getLogger(__name__)
 
-_ADDRESS_POLL_ATTEMPTS = 5
-_ADDRESS_POLL_DELAY_SECONDS = 1
+_ADDRESS_POLL_ATTEMPTS = 8
+_ADDRESS_POLL_DELAY_SECONDS = 1.5
 
 
 def _derive_names(user) -> tuple[str, str]:
@@ -127,8 +127,9 @@ def get_deposit_address(user, coin: str, *, network: str | None = None) -> Crypt
                 status=502,
             )
 
-        # Quidax generates some addresses asynchronously (wallet.address.generated
-        # webhook) — poll briefly instead of making the client retry from scratch.
+        # Quidax generates some addresses asynchronously and notifies via the
+        # wallet.address.generated webhook (see handle_address_generated_webhook) —
+        # poll briefly here too as a fast-path in case it lands within a few seconds.
         for _ in range(_ADDRESS_POLL_ATTEMPTS):
             time.sleep(_ADDRESS_POLL_DELAY_SECONDS)
             try:
@@ -157,6 +158,33 @@ def get_deposit_address(user, coin: str, *, network: str | None = None) -> Crypt
 
 
 # ─── Webhooks ───────────────────────────────────────────────────────────────
+
+
+def handle_address_generated_webhook(payload: dict) -> None:
+    """wallet.address.generated — store the address the moment Quidax
+    finishes provisioning it, so a client retry after the push/poll window
+    lapses finds it already cached instead of re-running the create+poll
+    dance in get_deposit_address."""
+    data = payload.get('data') or payload
+    quidax_user_id = str((data.get('user') or {}).get('id') or data.get('user_id') or '')
+    coin = str(data.get('currency') or '').lower()
+    address_value = data.get('address')
+    network_key = str(data.get('network') or '').upper()
+    quidax_ref = str(data.get('id') or '')
+
+    if not quidax_user_id or not coin or not address_value:
+        return
+
+    sub_account = QuidaxSubAccount.objects.filter(quidax_user_id=quidax_user_id).first()
+    if not sub_account:
+        return
+
+    CryptoDepositAddress.objects.get_or_create(
+        user=sub_account.user,
+        coin=coin,
+        network=network_key,
+        defaults={'address': address_value, 'quidax_ref': quidax_ref},
+    )
 
 
 def handle_deposit_webhook(payload: dict) -> None:

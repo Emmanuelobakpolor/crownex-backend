@@ -311,6 +311,8 @@ class QuidaxWebhookView(APIView):
         event = request.data.get('event')
         if event == 'deposit.successful':
             deposits.handle_deposit_webhook(request.data)
+        elif event == 'wallet.address.generated':
+            deposits.handle_address_generated_webhook(request.data)
         elif event in ('order.done', 'order.completed'):
             deposits.handle_order_webhook(request.data)
         elif event == 'withdraw.successful':
