@@ -158,7 +158,10 @@ def _execute_quidax_withdrawal(withdrawal: CryptoWithdrawal) -> CryptoWithdrawal
             currency=withdrawal.coin,
             amount=volume,
             address=withdrawal.address,
-            network=withdrawal.network or None,
+            # Stored uppercase (see request_withdrawal) for our own
+            # comparisons/display, but Quidax's network enum is lowercase
+            # ('trc20', 'erc20', ...) and rejects/ignores anything else.
+            network=withdrawal.network.lower() or None,
             reference=withdrawal.reference,
             user_id=settings.QUIDAX_USER_ID,
         )
