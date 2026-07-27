@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 
 from accounts.models import User
 from accounts.services import issue_tokens
+from cards.models import VirtualCard
 from crypto import orders as crypto_orders
 from crypto import services as crypto_services
 from crypto import withdrawals as crypto_withdrawals
@@ -32,6 +33,7 @@ from .serializers import (
     AdminKycVerificationSerializer,
     AdminLoginSerializer,
     AdminProfileUpdateSerializer,
+    AdminVirtualCardSerializer,
     CreateAdminSerializer,
 )
 
@@ -483,4 +485,44 @@ class AdminKycActionView(APIView):
 
         return Response(
             AdminKycVerificationSerializer(verification, context={'request': request}).data
+        )
+
+
+class AdminCardListView(APIView):
+    """GET /api/admin/cards/?status=&search= — read-only visibility.
+
+    Cards move through Bitnob's own lifecycle automatically (no manual
+    approve/reject step like KYC or crypto orders) — this is for
+    visibility and manual recovery, not routine action.
+    """
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        qs = (
+            VirtualCard.objects.select_related('user')
+            .prefetch_related('logs', 'transactions')
+            .order_by('-created_at')
+        )
+
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(Q(masked_pan__icontains=search) | Q(user__email__icontains=search))
+
+        page_size = min(int(request.query_params.get('page_size', 25) or 25), 100)
+        page = request.query_params.get('page', 1)
+        paginator = Paginator(qs, page_size)
+        page_obj = paginator.get_page(page)
+
+        return Response(
+            {
+                'count': paginator.count,
+                'page': page_obj.number,
+                'page_size': page_size,
+                'num_pages': paginator.num_pages,
+                'results': AdminVirtualCardSerializer(page_obj.object_list, many=True).data,
+            }
         )

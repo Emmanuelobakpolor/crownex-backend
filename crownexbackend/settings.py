@@ -73,6 +73,7 @@ INSTALLED_APPS = [
     'giftcards',
     'crypto',
     'kyc',
+    'cards',
     'adminpanel',
 ]
 
@@ -349,6 +350,19 @@ QUIDAX_WEBHOOK_SECRET = os.environ.get('QUIDAX_WEBHOOK_SECRET', '')
 DOJAH_APP_ID = os.environ.get('DOJAH_APP_ID', '')
 DOJAH_SECRET_KEY = os.environ.get('DOJAH_SECRET_KEY', '')
 DOJAH_BASE_URL = os.environ.get('DOJAH_BASE_URL', 'https://sandbox.dojah.io')
+
+
+# Bitnob — USD virtual card issuing (cards app). Auth is HMAC-SHA256
+# request signing (not a static bearer secret like the other integrations
+# here) — see cards/bitnob.py for the signing function. CLIENT_SECRET is
+# server-only and never sent to the Flutter app.
+BITNOB_CLIENT_ID = os.environ.get('BITNOB_CLIENT_ID', '')
+BITNOB_CLIENT_SECRET = os.environ.get('BITNOB_CLIENT_SECRET', '')
+BITNOB_BASE_URL = os.environ.get('BITNOB_BASE_URL', 'https://api.bitnob.com')
+try:
+    BITNOB_NGN_PER_USD = Decimal(os.environ.get('BITNOB_NGN_PER_USD') or '1600')
+except InvalidOperation:
+    BITNOB_NGN_PER_USD = Decimal('1600')
 
 
 # App-controlled USD->NGN rate used only to convert each fee row's flat_usd

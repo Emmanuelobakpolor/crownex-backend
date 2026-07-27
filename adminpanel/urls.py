@@ -42,4 +42,5 @@ urlpatterns = [
     ),
     path('kyc/', views.AdminKycListView.as_view(), name='admin-kyc'),
     path('kyc/<int:pk>/', views.AdminKycActionView.as_view(), name='admin-kyc-action'),
+    path('cards/', views.AdminCardListView.as_view(), name='admin-cards'),
 ]

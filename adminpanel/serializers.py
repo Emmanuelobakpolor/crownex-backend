@@ -5,6 +5,8 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from accounts.models import User
+from cards.models import CardLog, CardTransaction, VirtualCard
+from cards.services import micro_to_decimal
 from crypto.models import CryptoOrder, CryptoOrderLog, CryptoWithdrawal, CryptoWithdrawalLog
 from kyc.models import KycLog, KycVerification
 
@@ -212,3 +214,58 @@ class AdminKycVerificationSerializer(serializers.ModelSerializer):
 class AdminKycActionSerializer(serializers.Serializer):
     action = serializers.ChoiceField(choices=['approve', 'reject'])
     note = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class AdminCardLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CardLog
+        fields = ['event', 'detail', 'created_at']
+        read_only_fields = fields
+
+
+class AdminCardTransactionSerializer(serializers.ModelSerializer):
+    amount_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CardTransaction
+        fields = [
+            'reference',
+            'type',
+            'status',
+            'amount_display',
+            'ngn_amount',
+            'description',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_amount_display(self, obj: CardTransaction) -> str:
+        return str(micro_to_decimal(obj.amount_usd_micro))
+
+
+class AdminVirtualCardSerializer(serializers.ModelSerializer):
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+    balance_display = serializers.SerializerMethodField()
+    logs = AdminCardLogSerializer(many=True, read_only=True)
+    transactions = AdminCardTransactionSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = VirtualCard
+        fields = [
+            'id',
+            'user_email',
+            'status',
+            'created_status',
+            'card_brand',
+            'masked_pan',
+            'cardholder_name',
+            'balance_display',
+            'created_at',
+            'updated_at',
+            'logs',
+            'transactions',
+        ]
+        read_only_fields = fields
+
+    def get_balance_display(self, obj: VirtualCard) -> str:
+        return str(micro_to_decimal(obj.balance_usd_micro))

@@ -18,6 +18,7 @@ urlpatterns = [
     path('api/giftcards/', include('giftcards.urls')),
     path('api/crypto/', include('crypto.urls')),
     path('api/kyc/', include('kyc.urls')),
+    path('api/cards/', include('cards.urls')),
     path('api/admin/', include('adminpanel.urls')),
 ]
 
