@@ -27,8 +27,8 @@ from .services import CryptoServiceError, _validate_coin, credit_crypto_availabl
 
 logger = logging.getLogger(__name__)
 
-_ADDRESS_POLL_ATTEMPTS = 9
-_ADDRESS_POLL_DELAY_SECONDS = 10
+_ADDRESS_POLL_ATTEMPTS = 4
+_ADDRESS_POLL_DELAY_SECONDS = 1.5
 
 
 def _derive_names(user) -> tuple[str, str]:
