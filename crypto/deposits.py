@@ -119,13 +119,7 @@ def get_deposit_address(user, coin: str, *, network: str | None = None) -> Crypt
 
     if not found:
         try:
-            # Quidax's network enum is lowercase ('trc20', 'erc20', ...) and
-            # rejects/ignores anything else — network_key is uppercased for
-            # our own comparisons and DB storage, so re-lower it here rather
-            # than passing the client's raw casing straight through.
-            quidax.create_deposit_address(
-                sub_account.quidax_user_id, coin, network=network_key.lower() or None
-            )
+            quidax.create_deposit_address(sub_account.quidax_user_id, coin, network=network or None)
         except QuidaxError as exc:
             raise CryptoServiceError(
                 f'Could not create deposit address: {exc.message}',
