@@ -102,6 +102,33 @@ def create_sub_account(*, email: str, first_name: str, last_name: str) -> dict:
     )
 
 
+def find_sub_account_by_email(email: str) -> dict | None:
+    """GET /users — Quidax has no search-by-email endpoint, only "fetch all
+    sub-accounts", so we page through it and filter client-side. Used to
+    reconcile the "sub account with this email already exists" case: a
+    sub-account exists on Quidax's side but our local QuidaxSubAccount row
+    is missing (e.g. a prior signup succeeded remotely but never saved
+    locally). Returns the matching user dict, or None if not found."""
+    target = email.strip().lower()
+    page = 1
+    while True:
+        payload = _request('GET', '/users', params={'page': page})
+        rows = payload.get('data') or []
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if str(row.get('email') or '').strip().lower() == target:
+                return row
+        if len(rows) < 1:
+            return None
+        # Stop once a short page tells us we've reached the end; Quidax's
+        # docs don't specify a page size, so this is a defensive cap rather
+        # than relying on an exact "full page" size match.
+        if len(rows) < 20 or page >= 50:
+            return None
+        page += 1
+
+
 # ─── Deposit addresses ──────────────────────────────────────────────────────
 
 

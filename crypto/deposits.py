@@ -46,6 +46,64 @@ def _derive_names(user) -> tuple[str, str]:
     return parts[0], parts[0]
 
 
+def _is_duplicate_email_error(exc: QuidaxError) -> bool:
+    """True when Quidax rejected create_sub_account because a sub-account
+    for this email already exists on their side (vs. a network error, rate
+    limit, or unrelated validation failure)."""
+    message = (exc.message or '').lower()
+    return 'already exist' in message and 'email' in message
+
+
+def _link_sub_account(user, data: dict) -> QuidaxSubAccount:
+    quidax_id = str((data or {}).get('id') or '')
+    if not quidax_id:
+        logger.error('Quidax sub-account response had no id for %s: %s', user.email, data)
+        raise CryptoServiceError(
+            'Quidax did not return a sub-account id.', code='quidax_error', status=502
+        )
+    sub_account, _ = QuidaxSubAccount.objects.get_or_create(
+        user=user, defaults={'quidax_user_id': quidax_id}
+    )
+    return sub_account
+
+
+def _reconcile_existing_sub_account(user, create_exc: QuidaxError) -> QuidaxSubAccount:
+    """Quidax already has a sub-account for this email (e.g. a prior signup
+    succeeded remotely but the local QuidaxSubAccount row was never saved).
+    Look it up and link it locally instead of failing outright."""
+    logger.warning(
+        'Quidax reports a sub-account already exists for %s — reconciling instead of creating.',
+        user.email,
+    )
+    try:
+        found = quidax.find_sub_account_by_email(user.email)
+    except QuidaxError as lookup_exc:
+        logger.error(
+            'Quidax sub-account reconciliation lookup failed for %s: %s (payload=%s)',
+            user.email,
+            lookup_exc.message,
+            lookup_exc.payload,
+        )
+        raise CryptoServiceError(
+            f'Could not set up your crypto account: {lookup_exc.message}',
+            code='quidax_unreachable',
+            status=502,
+        )
+
+    if not found:
+        logger.error(
+            'Quidax reported a duplicate sub-account for %s but it could not be found via lookup.',
+            user.email,
+        )
+        raise CryptoServiceError(
+            f'Could not set up your crypto account: {create_exc.message}',
+            code='quidax_unreachable',
+            status=502,
+        )
+
+    return _link_sub_account(user, found)
+
+
 def get_or_create_sub_account(user) -> QuidaxSubAccount:
     existing = QuidaxSubAccount.objects.filter(user=user).first()
     if existing:
@@ -57,6 +115,8 @@ def get_or_create_sub_account(user) -> QuidaxSubAccount:
             email=user.email, first_name=first_name, last_name=last_name
         )
     except QuidaxError as exc:
+        if _is_duplicate_email_error(exc):
+            return _reconcile_existing_sub_account(user, exc)
         logger.error(
             'Quidax sub-account creation failed for %s: %s (payload=%s)',
             user.email,
@@ -69,18 +129,7 @@ def get_or_create_sub_account(user) -> QuidaxSubAccount:
             status=502,
         )
 
-    data = payload.get('data') or {}
-    quidax_id = str(data.get('id') or '')
-    if not quidax_id:
-        logger.error('Quidax sub-account response had no id for %s: %s', user.email, payload)
-        raise CryptoServiceError(
-            'Quidax did not return a sub-account id.', code='quidax_error', status=502
-        )
-
-    sub_account, _ = QuidaxSubAccount.objects.get_or_create(
-        user=user, defaults={'quidax_user_id': quidax_id}
-    )
-    return sub_account
+    return _link_sub_account(user, payload.get('data') or {})
 
 
 def _pick_address(payload: dict, network_key: str) -> tuple[str, str] | None:
