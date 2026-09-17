@@ -7,6 +7,7 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 
+from accounts.version import VersionView
 from accounts.views import ProfileView
 
 urlpatterns = [
@@ -20,6 +21,7 @@ urlpatterns = [
     path('api/kyc/', include('kyc.urls')),
     path('api/cards/', include('cards.urls')),
     path('api/admin/', include('adminpanel.urls')),
+    path('api/version/', VersionView.as_view(), name='version'),
 ]
 
 if settings.DEBUG:
