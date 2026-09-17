@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.db import transaction
@@ -11,6 +13,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .emails import send_otp_email
 from .models import OTPPurpose, User, VerificationOTP
 from .tokens import generate_otp_code, hash_code, otp_expiry, verify_code
+
+logger = logging.getLogger(__name__)
 
 
 class AuthServiceError(Exception):
@@ -430,3 +434,55 @@ def logout_user(refresh_token: str) -> None:
             code='invalid_token',
             status=400,
         ) from exc
+
+
+def _deletion_snapshot(user: User) -> dict:
+    """Capture what a hard delete is about to cascade away, for the audit log."""
+    snapshot = {
+        'user_id': user.pk,
+        'email': user.email,
+        'phone': user.phone,
+        'date_joined': user.date_joined.isoformat(),
+    }
+
+    wallet = getattr(user, 'wallet', None)
+    snapshot['ngn_balance'] = str(wallet.ngn_balance) if wallet else '0'
+
+    for label, manager_name in (
+        ('transactions', 'transactions'),
+        ('crypto_orders', 'crypto_orders'),
+        ('crypto_withdrawals', 'crypto_withdrawals'),
+    ):
+        manager = getattr(user, manager_name, None)
+        snapshot[label] = manager.count() if manager is not None else 0
+
+    return snapshot
+
+
+def delete_user(user: User, *, deleted_by: User | None = None) -> dict:
+    """Permanently delete `user` and everything cascading from them.
+
+    Every relation to User is on_delete=CASCADE, so this destroys the wallet,
+    transaction ledger, crypto orders, KYC records and virtual card along with
+    the account. It cannot be undone; the snapshot is logged first so the
+    removal is at least traceable.
+    """
+    snapshot = _deletion_snapshot(user)
+    actor = deleted_by.email if deleted_by is not None else user.email
+
+    with transaction.atomic():
+        user.delete()
+
+    logger.warning('Hard-deleted user %s by %s — cascaded %s', snapshot['email'], actor, snapshot)
+    return snapshot
+
+
+def delete_own_account(user: User, password: str) -> dict:
+    """Self-service account closure, gated on the account password."""
+    if not user.check_password(password):
+        raise AuthServiceError(
+            'Password is incorrect.',
+            code='invalid_password',
+            status=400,
+        )
+    return delete_user(user, deleted_by=user)

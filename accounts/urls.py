@@ -39,6 +39,11 @@ urlpatterns = [
         views.ChangeTransactionPinView.as_view(),
         name='auth-change-transaction-pin',
     ),
+    path(
+        'delete-account/',
+        views.DeleteAccountView.as_view(),
+        name='auth-delete-account',
+    ),
     # Password reset
     path(
         'forgot-password/',

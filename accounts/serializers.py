@@ -238,3 +238,15 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
                 'This phone number is already in use.'
             )
         return phone
+
+
+class DeleteAccountSerializer(serializers.Serializer):
+    password = serializers.CharField(write_only=True)
+    confirm = serializers.CharField(write_only=True)
+
+    def validate_confirm(self, value):
+        if value.strip().upper() != 'DELETE':
+            raise serializers.ValidationError(
+                'Type DELETE to confirm permanent account deletion.'
+            )
+        return value

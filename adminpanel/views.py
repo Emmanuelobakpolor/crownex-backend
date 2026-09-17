@@ -13,7 +13,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
-from accounts.services import issue_tokens
+from accounts.services import delete_user, issue_tokens
 from cards.models import VirtualCard
 from crypto import orders as crypto_orders
 from crypto import services as crypto_services
@@ -180,6 +180,34 @@ class AdminUserDetailView(APIView):
             return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         return Response(services.serialize_user(user, request=request))
+
+    def delete(self, request, pk):
+        """Permanently delete a user and everything cascading from them."""
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if user.pk == request.user.pk:
+            return Response(
+                {'detail': 'You cannot delete your own admin account.', 'code': 'self_delete'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if user.is_staff or user.is_superuser:
+            return Response(
+                {
+                    'detail': 'Staff accounts cannot be deleted through this endpoint.',
+                    'code': 'staff_protected',
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        snapshot = delete_user(user, deleted_by=request.user)
+        return Response(
+            {'message': f'User {snapshot["email"]} permanently deleted.', 'deleted': snapshot},
+            status=status.HTTP_200_OK,
+        )
 
 
 class AdminTransactionListView(APIView):

@@ -10,6 +10,7 @@ from .serializers import (
     ChangePasswordSerializer,
     ChangeTransactionPinSerializer,
     CompleteProfileSerializer,
+    DeleteAccountSerializer,
     ForgotPasswordSerializer,
     LoginSerializer,
     LogoutSerializer,
@@ -348,6 +349,33 @@ class ProfileView(generics.RetrieveUpdateAPIView):
         serializer.save()
         return Response(
             UserSerializer(request.user, context={'request': request}).data
+        )
+
+
+
+
+class DeleteAccountView(APIView):
+    """DELETE /api/auth/delete-account/ — permanent self-service account closure."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request):
+        serializer = DeleteAccountSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            snapshot = services.delete_own_account(
+                user=request.user,
+                password=serializer.validated_data['password'],
+            )
+        except services.AuthServiceError as exc:
+            return _error_response(exc)
+
+        return Response(
+            {
+                'message': 'Your account and all associated data have been permanently deleted.',
+                'deleted': snapshot,
+            },
+            status=status.HTTP_200_OK,
         )
 
 
