@@ -186,7 +186,7 @@ class AdminKycVerificationSerializer(serializers.ModelSerializer):
             'address',
             'selfie',
             'id_document',
-            'dojah_reference_id',
+            'reference_id',
             'match_score',
             'status',
             'reviewer_note',

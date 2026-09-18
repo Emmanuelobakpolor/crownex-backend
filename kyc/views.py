@@ -10,7 +10,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import services
-from .serializers import KycVerificationSerializer, SubmitVerificationSerializer
+from .serializers import (
+    KycVerificationSerializer,
+    SubmitVerificationSerializer,
+    UpdateAddressSerializer,
+)
 
 
 def _error_response(exc: services.KycServiceError) -> Response:
@@ -54,4 +58,23 @@ class VerificationStatusView(APIView):
         verification = services.get_verification(request.user)
         if verification is None:
             return Response({'status': None})
+        return Response(KycVerificationSerializer(verification).data)
+
+
+class UpdateAddressView(APIView):
+    """PATCH /api/kyc/address/ — { address } — saves the residential
+    address collected in the wizard's last step, without re-calling Dojah.
+    """
+
+    def patch(self, request):
+        serializer = UpdateAddressSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            verification = services.update_address(
+                request.user, serializer.validated_data['address']
+            )
+        except services.KycServiceError as exc:
+            return _error_response(exc)
+
         return Response(KycVerificationSerializer(verification).data)

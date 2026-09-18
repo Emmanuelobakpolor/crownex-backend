@@ -101,7 +101,10 @@ def submit_verification(
     confidence = selfie_check.get('confidence_value')
     score = Decimal(str(confidence)) if confidence is not None else None
 
-    verification.dojah_reference_id = str(payload.get('reference_id') or '')
+    # Dojah's NIN/BVN + selfie response has no reference_id and no address
+    # field (confirmed against their API docs) — reference_id is set once at
+    # creation (see the model default) and left alone here; address only
+    # ever comes from the user, via update_address below.
     verification.match_score = score
     verification.full_name = entity.get('full_name') or entity.get('first_name', '')
     verification.date_of_birth = entity.get('date_of_birth', '')
@@ -109,7 +112,6 @@ def submit_verification(
     verification.status = _status_from_score(score)
     verification.save(
         update_fields=[
-            'dojah_reference_id',
             'match_score',
             'full_name',
             'date_of_birth',
@@ -124,6 +126,21 @@ def submit_verification(
         'dojah_verified',
         f'match_score={score} status={verification.status}',
     )
+    return verification
+
+
+def update_address(user, address: str) -> KycVerification:
+    """PATCH-style update for the residential address collected in the
+    wizard's last step — deliberately separate from submit_verification so
+    saving it never re-triggers a (paid) Dojah call."""
+    verification = get_verification(user)
+    if verification is None:
+        raise KycServiceError(
+            'Submit identity verification before setting an address.', code='not_submitted'
+        )
+    verification.address = address
+    verification.save(update_fields=['address', 'updated_at'])
+    _log(verification, 'address_updated')
     return verification
 
 

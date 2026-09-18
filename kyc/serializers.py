@@ -31,3 +31,10 @@ class SubmitVerificationSerializer(serializers.Serializer):
 
     def validate_id_number(self, value: str) -> str:
         return value.strip()
+
+
+class UpdateAddressSerializer(serializers.Serializer):
+    address = serializers.CharField(min_length=1, max_length=2000)
+
+    def validate_address(self, value: str) -> str:
+        return value.strip()

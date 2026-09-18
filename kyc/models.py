@@ -5,8 +5,17 @@ QuidaxSubAccount in crypto/models.py). See kyc/services.py for how
 match_score maps to status, and kyc/dojah.py for the Dojah API client.
 """
 
+import uuid
+
 from django.conf import settings
 from django.db import models
+
+
+def generate_kyc_reference() -> str:
+    """App-generated support/search reference — Dojah's NIN/BVN + selfie
+    endpoint (see kyc/dojah.py) does not return a reference_id of its own,
+    so this is ours, not Dojah's."""
+    return f'KYC-{uuid.uuid4()}'
 
 
 class KycStatus(models.TextChoices):
@@ -37,7 +46,7 @@ class KycVerification(models.Model):
     selfie = models.ImageField(upload_to='kyc_selfies/', null=True, blank=True)
     id_document = models.ImageField(upload_to='kyc_documents/', null=True, blank=True)
 
-    dojah_reference_id = models.CharField(max_length=64, blank=True)
+    reference_id = models.CharField(max_length=64, blank=True, default=generate_kyc_reference)
     match_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     status = models.CharField(max_length=10, choices=KycStatus.choices, default=KycStatus.PENDING)
     raw_response = models.JSONField(default=dict, blank=True)
