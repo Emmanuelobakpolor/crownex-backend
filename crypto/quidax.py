@@ -12,6 +12,7 @@ the same way.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import requests
@@ -21,6 +22,8 @@ QUIDAX_BASE = 'https://openapi.quidax.io/exchange-open-api/api/v1'
 _TIMEOUT = 30
 _MAX_RETRIES = 3
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+logger = logging.getLogger(__name__)
 
 
 class QuidaxError(Exception):
@@ -110,23 +113,51 @@ def find_sub_account_by_email(email: str) -> dict | None:
     is missing (e.g. a prior signup succeeded remotely but never saved
     locally). Returns the matching user dict, or None if not found."""
     target = email.strip().lower()
-    page = 1
-    while True:
+    seen_ids: set[str] = set()
+    scanned = 0
+    for page in range(1, 201):
         payload = _request('GET', '/users', params={'page': page})
-        rows = payload.get('data') or []
-        if not isinstance(rows, list):
-            return None
+        rows = _extract_rows(payload)
+        if page == 1:
+            # Shape diagnostics only (no emails/PII) so a miss is debuggable.
+            data = payload.get('data') if isinstance(payload, dict) else None
+            logger.warning(
+                'Quidax /users lookup: payload keys=%s data type=%s first row keys=%s',
+                sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__,
+                type(data).__name__,
+                sorted(rows[0].keys()) if rows and isinstance(rows[0], dict) else None,
+            )
+        if not rows:
+            break
+        new_ids = {str(r.get('id')) for r in rows if isinstance(r, dict)} - seen_ids
+        if not new_ids:
+            # Quidax ignored ?page= and returned the same rows again.
+            break
+        seen_ids |= new_ids
         for row in rows:
-            if str(row.get('email') or '').strip().lower() == target:
+            if isinstance(row, dict) and _row_email(row) == target:
                 return row
-        if len(rows) < 1:
-            return None
-        # Stop once a short page tells us we've reached the end; Quidax's
-        # docs don't specify a page size, so this is a defensive cap rather
-        # than relying on an exact "full page" size match.
-        if len(rows) < 20 or page >= 50:
-            return None
-        page += 1
+        scanned += len(rows)
+    logger.warning('Quidax /users lookup found no match after %s pages, %s rows.', page, scanned)
+    return None
+
+
+def _extract_rows(payload) -> list:
+    """Quidax wraps lists inconsistently: data may be the list itself or a
+    dict holding it (data.users / data.data / data.items)."""
+    data = payload.get('data') if isinstance(payload, dict) else payload
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ('users', 'data', 'items', 'results'):
+            if isinstance(data.get(key), list):
+                return data[key]
+    return []
+
+
+def _row_email(row: dict) -> str:
+    email = row.get('email') or (row.get('user') or {}).get('email') or ''
+    return str(email).strip().lower()
 
 
 # ─── Deposit addresses ──────────────────────────────────────────────────────

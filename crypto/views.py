@@ -7,6 +7,8 @@ of the admin panel's endpoints — this module only exposes what the app
 
 import hashlib
 import hmac
+import json
+import logging
 
 from django.conf import settings
 from rest_framework import permissions, status
@@ -29,6 +31,8 @@ from .serializers import (
     WithdrawEstimateSerializer,
     WithdrawRequestSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _error_response(exc: services.CryptoServiceError) -> Response:
@@ -289,23 +293,62 @@ class EnsureAccountView(APIView):
             return Response({'ready': False})
 
 
+def _quidax_signature_valid(secret: str, sig_header: str, raw_body: bytes) -> bool:
+    """Check a `quidax-signature: t=<timestamp>,s=<signature>` header, where
+    signature = hex HMAC-SHA256(secret, "<timestamp>.<JSON.stringify(body)>").
+
+    Quidax signs JSON.stringify output, which can differ from the raw bytes
+    in whitespace, so a compact re-serialization is tried as a fallback.
+    No freshness window: the docs don't say whether t is seconds or ms.
+    """
+    if not sig_header or ',' not in sig_header:
+        return False
+    t_part, s_part = sig_header.split(',', 1)
+    if '=' not in t_part or '=' not in s_part:
+        return False
+    timestamp = t_part.split('=', 1)[1].strip()
+    received = s_part.split('=', 1)[1].strip().lower()
+    if not timestamp or not received:
+        return False
+
+    key = secret.encode('utf-8')
+    prefix = timestamp.encode('utf-8') + b'.'
+
+    def matches(body: bytes) -> bool:
+        expected = hmac.new(key, prefix + body, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, received)
+
+    if matches(raw_body):
+        return True
+    try:
+        compact = json.dumps(
+            json.loads(raw_body), separators=(',', ':'), ensure_ascii=False,
+        ).encode('utf-8')
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return compact != raw_body and matches(compact)
+
+
 class QuidaxWebhookView(APIView):
-    """POST /api/crypto/webhook/quidax/ — HMAC-SHA512(raw_body, secret)
-    verified against X-Quidax-Signature. Always answers 200 for events we
-    don't (yet) handle, so Quidax doesn't retry forever on something that
-    was never going to be processed."""
+    """POST /api/crypto/webhook/quidax/ — verified via the `quidax-signature`
+    header (t=<timestamp>,s=<HMAC-SHA256 of "<timestamp>.<body>">); see
+    _quidax_signature_valid. Always answers 200 for events we don't (yet)
+    handle, so Quidax doesn't retry forever on something that was never
+    going to be processed."""
 
     permission_classes = [permissions.AllowAny]
     authentication_classes = []
 
     def post(self, request):
         secret = settings.QUIDAX_WEBHOOK_SECRET
-        signature = request.headers.get('X-Quidax-Signature', '')
+        sig_header = request.headers.get('Quidax-Signature', '')
         if not secret:
             return Response({'detail': 'Webhook not configured.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-        expected = hmac.new(secret.encode('utf-8'), request.body, hashlib.sha512).hexdigest()
-        if not hmac.compare_digest(expected, signature):
+        if not _quidax_signature_valid(secret, sig_header, request.body):
+            logger.warning(
+                'Quidax webhook signature mismatch (header present: %s)', bool(sig_header),
+            )
             return Response({'detail': 'Invalid signature.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         event = request.data.get('event')
