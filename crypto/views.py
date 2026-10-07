@@ -340,14 +340,17 @@ class QuidaxWebhookView(APIView):
     authentication_classes = []
 
     def post(self, request):
+        # Read the raw body before anything touches request.data — Django
+        # refuses request.body once the stream has been parsed.
+        raw_body = request.body
         secret = settings.QUIDAX_WEBHOOK_SECRET
         sig_header = request.headers.get('Quidax-Signature', '')
-        logger.info('Quidax webhook received: event=%s', request.data.get('event'))
+        logger.info('Quidax webhook received (%s bytes, signature header: %s)', len(raw_body), bool(sig_header))
         if not secret:
             logger.error('Quidax webhook rejected: QUIDAX_WEBHOOK_SECRET is not set.')
             return Response({'detail': 'Webhook not configured.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-        if not _quidax_signature_valid(secret, sig_header, request.body):
+        if not _quidax_signature_valid(secret, sig_header, raw_body):
             logger.warning(
                 'Quidax webhook signature mismatch (header present: %s)', bool(sig_header),
             )
