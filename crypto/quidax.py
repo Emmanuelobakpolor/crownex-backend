@@ -174,6 +174,16 @@ def create_deposit_address(user_id: str, currency: str, *, network: str | None =
     return _request('POST', f'/users/{user_id}/wallets/{currency}/addresses', json=payload)
 
 
+# ─── Deposits ───────────────────────────────────────────────────────────────
+
+
+def list_deposits(user_id: str, currency: str) -> list:
+    """GET /users/{user_id}/deposits?currency= — used to reconcile deposits
+    whose deposit.successful webhook never arrived."""
+    payload = _request('GET', f'/users/{user_id}/deposits', params={'currency': currency})
+    return _extract_rows(payload)
+
+
 # ─── Orders (market buy/sell) ───────────────────────────────────────────────
 
 

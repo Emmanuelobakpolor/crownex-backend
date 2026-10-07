@@ -242,29 +242,102 @@ def handle_deposit_webhook(payload: dict) -> None:
     that's the identity Quidax's webhook payload actually carries (never
     the CrownEx user id)."""
     data = payload.get('data') or payload
-    quidax_deposit_id = str(data.get('id') or '')
     quidax_user_id = str((data.get('user') or {}).get('id') or data.get('user_id') or '')
-    currency = str(data.get('currency') or '').lower()
-    amount = data.get('amount')
-
-    if not quidax_deposit_id or not quidax_user_id or not currency or amount is None:
-        return
+    logger.info(
+        'Quidax deposit.successful received: id=%s user=%s currency=%s amount=%s',
+        data.get('id'), quidax_user_id, data.get('currency'), data.get('amount'),
+    )
 
     sub_account = QuidaxSubAccount.objects.filter(quidax_user_id=quidax_user_id).first()
     if not sub_account:
+        logger.error(
+            'Quidax deposit %s for unknown sub-account %r — not credited.',
+            data.get('id'), quidax_user_id,
+        )
         return
+
+    _credit_deposit(sub_account.user, data)
+
+
+# Quidax deposit states that mean the funds have landed.
+_CREDITABLE_DEPOSIT_STATES = {'accepted', 'successful', 'success', 'done', 'completed'}
+
+
+def _credit_deposit(user, data: dict) -> bool:
+    """Credit one Quidax deposit row to `user`, at most once ever (keyed on
+    the Quidax deposit id). Returns True if this call did the credit."""
+    quidax_deposit_id = str(data.get('id') or '')
+    currency = str(data.get('currency') or '').lower()
+    amount = data.get('amount')
+
+    if not quidax_deposit_id or not currency or amount is None:
+        logger.error('Quidax deposit payload missing id/currency/amount — not credited: %s', data)
+        return False
 
     with transaction.atomic():
         _event, created = CryptoDepositEvent.objects.get_or_create(
             quidax_deposit_id=quidax_deposit_id,
             defaults={
-                'user': sub_account.user,
+                'user': user,
                 'coin': currency,
                 'amount': Decimal(str(amount)),
             },
         )
         if created:
-            credit_crypto_available(sub_account.user, currency, Decimal(str(amount)))
+            credit_crypto_available(user, currency, Decimal(str(amount)))
+            logger.info('Credited deposit %s: %s %s -> %s', quidax_deposit_id, amount, currency, user.email)
+    return created
+
+
+def reconcile_deposits(user, coin: str, *, apply: bool = False) -> list[dict]:
+    """Pull the user's deposits from Quidax and credit any accepted ones we
+    have no CryptoDepositEvent for — the fallback for a missed
+    deposit.successful webhook. Safe to re-run: crediting is idempotent.
+
+    Returns one summary dict per deposit Quidax reported. With apply=False
+    nothing is written (dry run)."""
+    coin = _validate_coin(coin)
+    sub_account = QuidaxSubAccount.objects.filter(user=user).first()
+    if not sub_account:
+        raise CryptoServiceError('User has no Quidax sub-account.', code='no_sub_account', status=404)
+
+    try:
+        rows = quidax.list_deposits(sub_account.quidax_user_id, coin)
+    except QuidaxError as exc:
+        raise CryptoServiceError(
+            f'Could not load deposits: {exc.message}', code='quidax_unreachable', status=502
+        )
+
+    already = set(
+        CryptoDepositEvent.objects.filter(
+            quidax_deposit_id__in=[str(r.get('id') or '') for r in rows if isinstance(r, dict)]
+        ).values_list('quidax_deposit_id', flat=True)
+    )
+
+    results = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        deposit_id = str(row.get('id') or '')
+        state = str(row.get('status') or row.get('state') or '').lower()
+        row.setdefault('currency', coin)
+        summary = {
+            'id': deposit_id,
+            'amount': row.get('amount'),
+            'currency': row.get('currency'),
+            'state': state,
+            'txid': row.get('txid') or row.get('tx_id') or '',
+        }
+        if deposit_id in already:
+            summary['action'] = 'already_credited'
+        elif state not in _CREDITABLE_DEPOSIT_STATES:
+            summary['action'] = 'skipped_not_accepted'
+        elif not apply:
+            summary['action'] = 'would_credit'
+        else:
+            summary['action'] = 'credited' if _credit_deposit(user, row) else 'already_credited'
+        results.append(summary)
+    return results
 
 
 def handle_order_webhook(payload: dict) -> None:

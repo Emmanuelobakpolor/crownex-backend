@@ -342,7 +342,9 @@ class QuidaxWebhookView(APIView):
     def post(self, request):
         secret = settings.QUIDAX_WEBHOOK_SECRET
         sig_header = request.headers.get('Quidax-Signature', '')
+        logger.info('Quidax webhook received: event=%s', request.data.get('event'))
         if not secret:
+            logger.error('Quidax webhook rejected: QUIDAX_WEBHOOK_SECRET is not set.')
             return Response({'detail': 'Webhook not configured.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
         if not _quidax_signature_valid(secret, sig_header, request.body):
