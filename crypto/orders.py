@@ -117,6 +117,29 @@ def _fail_order(order: CryptoOrder, note: str, *, refund_ngn: bool) -> CryptoOrd
     return order
 
 
+def _outcome_unknown(exc: QuidaxError) -> bool:
+    """No HTTP status (timeout/network) or a 5xx: Quidax may have executed
+    the order anyway. A 4xx means it was definitely refused."""
+    return exc.status_code is None or exc.status_code >= 500
+
+
+def _flag_for_review(order: CryptoOrder, note: str) -> CryptoOrder:
+    """Parks an order whose market order may or may not have executed.
+    Deliberately does NOT refund NGN or release crypto: doing either when
+    Quidax actually filled the order would pay the user twice."""
+    with transaction.atomic():
+        locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
+        if locked.status in (OrderStatus.COMPLETED, OrderStatus.FAILED):
+            return locked
+        locked.status = OrderStatus.PROCESSING
+        locked.needs_review = True
+        locked.note = note
+        locked.save(update_fields=['status', 'needs_review', 'note', 'updated_at'])
+    _log(order, 'quidax_outcome_unknown', f'{note} Held for admin review — check the Quidax master account.')
+    order.refresh_from_db()
+    return order
+
+
 def _buy_market_volume_ngn(order: CryptoOrder) -> str:
     """Whole-naira floor of the crypto's own NGN value — NOT including our
     fee. Quidax only ever buys the notional; the fee stays with us as
@@ -134,10 +157,12 @@ def _execute_quidax_buy(order: CryptoOrder, *, refund_on_fail: bool) -> CryptoOr
 
     try:
         payload = quidax.create_instant_order(
-            market=market, side='buy', volume=volume, user_id=settings.QUIDAX_USER_ID
+            market=market, side='buy', volume=volume, user_id=settings.QUIDAX_USER_ID, retry=False
         )
     except QuidaxError as exc:
         _log(order, 'quidax_error', f'Buy order request failed: {exc.message}')
+        if _outcome_unknown(exc):
+            return _flag_for_review(order, f'Quidax buy outcome unknown: {exc.message}')
         return _fail_order(order, f'Quidax buy failed: {exc.message}', refund_ngn=refund_on_fail)
 
     data = payload.get('data') or {}
@@ -147,7 +172,10 @@ def _execute_quidax_buy(order: CryptoOrder, *, refund_on_fail: bool) -> CryptoOr
         'quidax_buy_sent',
         f'market={market} volume={volume} quidax_order_id={quidax_order_id}',
     )
+    return _complete_buy(order, quidax_order_id)
 
+
+def _complete_buy(order: CryptoOrder, quidax_order_id: str) -> CryptoOrder:
     with transaction.atomic():
         locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
         if locked.status == OrderStatus.COMPLETED:
@@ -278,24 +306,15 @@ def _sell_volume_crypto(order: CryptoOrder) -> str:
     return format(normalized, 'f')
 
 
-def _execute_quidax_sell(order: CryptoOrder) -> CryptoOrder:
-    """Places the market sell on Quidax and finalizes — on success, debits
-    the reserved crypto and credits the NGN payout; on failure, releases
-    the reservation back to available (nothing external moved yet, so
-    there's nothing to refund on the NGN side)."""
+def send_master_sell(order: CryptoOrder, *, retry: bool = True) -> str:
+    """Places the market sell on the master Quidax account and returns the
+    Quidax order id. Raises QuidaxError; touches no balances — callers
+    decide what a failure means for the reservation."""
     market = f'{order.coin}ngn'
     volume = _sell_volume_crypto(order)
-
-    try:
-        payload = quidax.create_instant_order(
-            market=market, side='sell', volume=volume, user_id=settings.QUIDAX_USER_ID
-        )
-    except QuidaxError as exc:
-        _log(order, 'quidax_error', f'Sell order request failed: {exc.message}')
-        release_reserved_crypto(order.user, order.coin, order.coin_amount)
-        _log(order, 'reservation_released', f'Released {order.coin_amount} {order.coin.upper()} back to available.')
-        return _fail_order(order, f'Quidax sell failed: {exc.message}', refund_ngn=False)
-
+    payload = quidax.create_instant_order(
+        market=market, side='sell', volume=volume, user_id=settings.QUIDAX_USER_ID, retry=retry
+    )
     data = payload.get('data') or {}
     quidax_order_id = str(data.get('id') or '')
     _log(
@@ -303,7 +322,31 @@ def _execute_quidax_sell(order: CryptoOrder) -> CryptoOrder:
         'quidax_sell_sent',
         f'market={market} volume={volume} quidax_order_id={quidax_order_id}',
     )
+    return quidax_order_id
 
+
+def _execute_quidax_sell(order: CryptoOrder) -> CryptoOrder:
+    """Places the market sell on Quidax and finalizes — on success, debits
+    the reserved crypto and credits the NGN payout; on failure, releases
+    the reservation back to available (nothing external moved yet, so
+    there's nothing to refund on the NGN side)."""
+    try:
+        quidax_order_id = send_master_sell(order, retry=False)
+    except QuidaxError as exc:
+        _log(order, 'quidax_error', f'Sell order request failed: {exc.message}')
+        if _outcome_unknown(exc):
+            # Crypto stays reserved until an admin confirms either way.
+            return _flag_for_review(order, f'Quidax sell outcome unknown: {exc.message}')
+        release_reserved_crypto(order.user, order.coin, order.coin_amount)
+        _log(order, 'reservation_released', f'Released {order.coin_amount} {order.coin.upper()} back to available.')
+        return _fail_order(order, f'Quidax sell failed: {exc.message}', refund_ngn=False)
+
+    return complete_sell(order, quidax_order_id)
+
+
+def complete_sell(order: CryptoOrder, quidax_order_id: str) -> CryptoOrder:
+    """Finalizes a sell Quidax accepted: debits the reserved crypto and
+    credits total_ngn, exactly once (a completed order is left alone)."""
     with transaction.atomic():
         locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
         if locked.status == OrderStatus.COMPLETED:
@@ -409,15 +452,17 @@ def _execute_quidax_swap(order: CryptoOrder) -> CryptoOrder:
     as never auto-refunding a Flutterwave-funded failed buy.
     """
     from_market = f'{order.coin}ngn'
-    to_market = f'{order.to_coin}ngn'
     sell_volume = _sell_volume_crypto(order)
 
     try:
         sell_payload = quidax.create_instant_order(
-            market=from_market, side='sell', volume=sell_volume, user_id=settings.QUIDAX_USER_ID
+            market=from_market, side='sell', volume=sell_volume, user_id=settings.QUIDAX_USER_ID, retry=False
         )
     except QuidaxError as exc:
         _log(order, 'quidax_error', f'Swap sell leg ({order.coin.upper()}) failed: {exc.message}')
+        if _outcome_unknown(exc):
+            # Source coin stays reserved; nothing bought yet.
+            return _flag_for_review(order, f'Swap sell leg outcome unknown: {exc.message}')
         release_reserved_crypto(order.user, order.coin, order.coin_amount)
         _log(
             order,
@@ -437,15 +482,34 @@ def _execute_quidax_swap(order: CryptoOrder) -> CryptoOrder:
         locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
         locked.quidax_sell_order_id = sell_order_id or locked.quidax_sell_order_id
         locked.save(update_fields=['quidax_sell_order_id', 'updated_at'])
+    order.refresh_from_db()
+    return _execute_swap_buy_leg(order)
 
+
+def _swap_sell_leg_done(order: CryptoOrder) -> bool:
+    return bool(order.quidax_sell_order_id)
+
+
+def _execute_swap_buy_leg(order: CryptoOrder) -> CryptoOrder:
+    """Leg 2. Only runs once leg 1 is known to have executed, so from here
+    on the source coin is gone on Quidax: it's debited on any outcome, never
+    released."""
+    to_market = f'{order.to_coin}ngn'
     buy_volume = _swap_leg2_volume_ngn(order)
     try:
         buy_payload = quidax.create_instant_order(
-            market=to_market, side='buy', volume=buy_volume, user_id=settings.QUIDAX_USER_ID
+            market=to_market, side='buy', volume=buy_volume, user_id=settings.QUIDAX_USER_ID, retry=False
         )
     except QuidaxError as exc:
         _log(order, 'quidax_error', f'Swap buy leg ({order.to_coin.upper()}) failed: {exc.message}')
         debit_reserved_crypto(order.user, order.coin, order.coin_amount)
+        if _outcome_unknown(exc):
+            _log(
+                order,
+                'reservation_debited',
+                f'{order.coin_amount} {order.coin.upper()} already sold on the sell leg.',
+            )
+            return _flag_for_review(order, f'Swap buy leg outcome unknown: {exc.message}')
         _log(
             order,
             'reservation_debited_needs_review',
@@ -464,7 +528,12 @@ def _execute_quidax_swap(order: CryptoOrder) -> CryptoOrder:
         'quidax_buy_leg_sent',
         f'market={to_market} volume={buy_volume} quidax_order_id={buy_order_id}',
     )
+    return _complete_swap(order, buy_order_id, debit_source=True)
 
+
+def _complete_swap(order: CryptoOrder, buy_order_id: str, *, debit_source: bool) -> CryptoOrder:
+    """debit_source=False when the source coin was already debited (a buy
+    leg that was parked for review, then confirmed executed)."""
     with transaction.atomic():
         locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
         if locked.status == OrderStatus.COMPLETED:
@@ -472,7 +541,8 @@ def _execute_quidax_swap(order: CryptoOrder) -> CryptoOrder:
         locked.quidax_order_id = buy_order_id or locked.quidax_order_id
         locked.status = OrderStatus.COMPLETED
         locked.save(update_fields=['quidax_order_id', 'status', 'updated_at'])
-        debit_reserved_crypto(locked.user, locked.coin, locked.coin_amount)
+        if debit_source:
+            debit_reserved_crypto(locked.user, locked.coin, locked.coin_amount)
         credit_crypto_available(locked.user, locked.to_coin, locked.to_coin_amount)
 
     _log(order, 'order_completed', f'Credited {order.to_coin_amount} {order.to_coin.upper()} to wallet.')
@@ -615,3 +685,67 @@ def admin_retry_buy(order: CryptoOrder, note: str = '') -> CryptoOrder:
     order.refresh_from_db()
 
     return _execute_quidax_buy(order, refund_on_fail=was_refunded)
+
+
+def _wallet_payment_outstanding(order: CryptoOrder) -> bool:
+    """True if the NGN for the current buy attempt came out of our wallet
+    and hasn't been refunded since — Flutterwave/bank-funded buys never are."""
+    events = list(order.logs.values_list('event', flat=True))
+    paid = events.count('paid_from_wallet') + events.count('admin_retry_redebited')
+    return paid > events.count('refunded_after_failure')
+
+
+def admin_resolve_unknown_order(order: CryptoOrder, note: str = '', *, executed: bool) -> CryptoOrder:
+    """Closes out an order parked by _flag_for_review, once an admin has
+    checked the Quidax master account's order history. executed=True
+    finishes it as if Quidax had answered success; executed=False as if it
+    had refused (refund/release exactly as a normal failure would)."""
+    if not order.needs_review or order.status != OrderStatus.PROCESSING:
+        raise CryptoServiceError(
+            'Only orders held for review can be resolved this way.', code='invalid_state'
+        )
+    with transaction.atomic():
+        locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
+        if not locked.needs_review or locked.status != OrderStatus.PROCESSING:
+            return locked
+        locked.needs_review = False
+        locked.save(update_fields=['needs_review', 'updated_at'])
+    order.refresh_from_db()
+    outcome = 'executed' if executed else 'did not execute'
+    _log(order, 'admin_resolved', f'Admin confirmed the Quidax order {outcome}. {note}'.strip())
+
+    if order.order_type == OrderType.BUY:
+        if executed:
+            return _complete_buy(order, '')
+        return _fail_order(
+            order,
+            'Quidax buy did not execute (confirmed by admin).',
+            refund_ngn=_wallet_payment_outstanding(order),
+        )
+
+    if order.order_type == OrderType.SELL:
+        if executed:
+            return complete_sell(order, '')
+        release_reserved_crypto(order.user, order.coin, order.coin_amount)
+        _log(order, 'reservation_released', f'Released {order.coin_amount} {order.coin.upper()} back to available.')
+        return _fail_order(order, 'Quidax sell did not execute (confirmed by admin).', refund_ngn=False)
+
+    # Swap: which leg was unknown decides what's still held.
+    if not _swap_sell_leg_done(order):
+        if executed:
+            order.quidax_sell_order_id = 'admin-confirmed'
+            order.save(update_fields=['quidax_sell_order_id', 'updated_at'])
+            return _execute_swap_buy_leg(order)
+        release_reserved_crypto(order.user, order.coin, order.coin_amount)
+        _log(order, 'reservation_released', f'Released {order.coin_amount} {order.coin.upper()} back to available.')
+        return _fail_order(order, 'Swap sell leg did not execute (confirmed by admin).', refund_ngn=False)
+
+    if executed:
+        return _complete_swap(order, '', debit_source=False)
+    _log(
+        order,
+        'reservation_debited_needs_review',
+        f'{order.coin_amount} {order.coin.upper()} was sold on the sell leg but the buy leg did not '
+        f'execute. Admin must credit {order.to_coin.upper()} or compensate the user.',
+    )
+    return _fail_order(order, 'Swap buy leg did not execute after sell leg succeeded.', refund_ngn=False)

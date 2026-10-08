@@ -55,20 +55,21 @@ def _parse(response: requests.Response) -> dict:
         ) from exc
 
 
-def _request(method: str, path: str, **kwargs) -> dict:
+def _request(method: str, path: str, *, retry: bool = True, **kwargs) -> dict:
     url = f'{QUIDAX_BASE}{path}'
     last_exc: Exception | None = None
+    max_attempts = _MAX_RETRIES if retry else 1
 
-    for attempt in range(_MAX_RETRIES):
+    for attempt in range(max_attempts):
         try:
             response = requests.request(method, url, headers=_headers(), timeout=_TIMEOUT, **kwargs)
         except requests.RequestException as exc:
             last_exc = exc
-            if attempt < _MAX_RETRIES - 1:
+            if attempt < max_attempts - 1:
                 time.sleep(0.5 * (2**attempt))
             continue
 
-        if response.status_code in _RETRY_STATUSES and attempt < _MAX_RETRIES - 1:
+        if response.status_code in _RETRY_STATUSES and attempt < max_attempts - 1:
             time.sleep(0.5 * (2**attempt))
             continue
 
@@ -187,11 +188,18 @@ def list_deposits(user_id: str, currency: str) -> list:
 # ─── Orders (market buy/sell) ───────────────────────────────────────────────
 
 
-def create_instant_order(*, market: str, side: str, volume: str, user_id: str = 'me') -> dict:
-    """POST /users/{user_id}/orders — market order (buy or sell)."""
+def create_instant_order(
+    *, market: str, side: str, volume: str, user_id: str = 'me', retry: bool = True
+) -> dict:
+    """POST /users/{user_id}/orders — market order (buy or sell).
+
+    Orders carry no client reference, so retrying after a 5xx/timeout that
+    Quidax actually executed places a second order. retry=False surfaces
+    any such failure as-is (status_code None or 5xx = outcome unknown)."""
     return _request(
         'POST',
         f'/users/{user_id}/orders',
+        retry=retry,
         json={'market': market, 'side': side, 'ord_type': 'market', 'volume': volume},
     )
 
@@ -220,3 +228,88 @@ def create_withdrawal(
     if reference:
         payload['reference'] = reference
     return _request('POST', f'/users/{user_id}/withdraws', json=payload)
+
+
+# ─── Sub-account -> master sweeps ───────────────────────────────────────────
+#
+# Per Quidax's "Creating an Internal Withdrawal from a Sub-Account to the
+# Main Account" guide: the same withdraws endpoint, called on the
+# sub-account with fund_uid = the master account's id. Settles as type
+# internal_transfer (no txid) and finishes with status done | rejected,
+# also announced via withdraw.successful / withdraw.rejected.
+
+
+def get_master_account() -> dict:
+    """GET /users/me — data.id is the fund_uid sweeps are sent to."""
+    return _request('GET', '/users/me')
+
+
+def get_wallet(user_id: str, currency: str) -> dict:
+    """GET /users/{user_id}/wallets/{currency}"""
+    return _request('GET', f'/users/{user_id}/wallets/{currency}')
+
+
+def create_internal_transfer(
+    *, from_user_id: str, to_user_id: str, currency: str, amount: str, reference: str
+) -> dict:
+    """POST /users/{from_user_id}/withdraws with fund_uid=<to_user_id>.
+    reference is mandatory here: Quidax rejects a reused one, which is what
+    makes a retried request (ours or _request's) unable to move funds twice."""
+    return _request(
+        'POST',
+        f'/users/{from_user_id}/withdraws',
+        json={
+            'currency': currency,
+            'amount': amount,
+            'fund_uid': to_user_id,
+            'reference': reference,
+            'transaction_note': 'CrownEx deposit sweep',
+            'narration': 'CrownEx deposit sweep',
+        },
+    )
+
+
+def get_withdrawal_by_reference(user_id: str, reference: str) -> dict:
+    """GET /users/{user_id}/withdraws/reference/{reference}"""
+    return _request('GET', f'/users/{user_id}/withdraws/reference/{reference}')
+
+
+# ─── Instant swap (quoted price) ────────────────────────────────────────────
+#
+# Not used by trading yet — see probe_quidax_swap. Quote, then confirm
+# within ~15s; the result (and swap_transaction.completed webhook) carries
+# execution_price / received_amount to compare against the quote.
+
+
+def temporary_swap_quotation(
+    *, from_currency: str, to_currency: str, from_amount: str, user_id: str = 'me'
+) -> dict:
+    """POST /users/{user_id}/temporary_swap_quotation — price preview only,
+    creates nothing that can be confirmed."""
+    return _request(
+        'POST',
+        f'/users/{user_id}/temporary_swap_quotation',
+        json={'from_currency': from_currency, 'to_currency': to_currency, 'from_amount': from_amount},
+    )
+
+
+def create_swap_quotation(
+    *, from_currency: str, to_currency: str, from_amount: str, user_id: str = 'me'
+) -> dict:
+    """POST /users/{user_id}/swap_quotation"""
+    return _request(
+        'POST',
+        f'/users/{user_id}/swap_quotation',
+        json={'from_currency': from_currency, 'to_currency': to_currency, 'from_amount': from_amount},
+    )
+
+
+def confirm_swap_quotation(quotation_id: str, *, user_id: str = 'me') -> dict:
+    """POST /users/{user_id}/swap_quotation/{id}/confirm — executes the swap.
+    Never retried automatically (a quotation can only be used once anyway)."""
+    return _request('POST', f'/users/{user_id}/swap_quotation/{quotation_id}/confirm', retry=False)
+
+
+def get_swap_transaction(swap_id: str, *, user_id: str = 'me') -> dict:
+    """GET /users/{user_id}/swap_transactions/{id}"""
+    return _request('GET', f'/users/{user_id}/swap_transactions/{swap_id}')

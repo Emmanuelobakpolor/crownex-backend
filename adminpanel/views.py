@@ -309,7 +309,7 @@ class AdminCryptoFeeUpdateView(APIView):
 
 
 class AdminCryptoOrderListView(APIView):
-    """GET /api/admin/crypto/orders/?status=&type=&search=&page=&page_size="""
+    """GET /api/admin/crypto/orders/?status=&type=&needs_review=1&search=&page=&page_size="""
 
     permission_classes = [permissions.IsAdminUser]
 
@@ -322,6 +322,8 @@ class AdminCryptoOrderListView(APIView):
         type_filter = request.query_params.get('type')
         if type_filter:
             qs = qs.filter(order_type=type_filter)
+        if request.query_params.get('needs_review') in ('1', 'true'):
+            qs = qs.filter(needs_review=True)
         search = request.query_params.get('search', '').strip()
         if search:
             qs = qs.filter(Q(reference__icontains=search) | Q(user__email__icontains=search))
@@ -352,6 +354,8 @@ class AdminCryptoOrderActionView(APIView):
       reject          cancel a stuck pending_payment/waiting_deposit order
       confirm_deposit waiting_deposit sell -> re-attempt (webhook missed)
       retry           re-attempt a failed buy
+      confirm_executed      order held for review: Quidax DID execute it -> finish it
+      confirm_not_executed  order held for review: Quidax did NOT -> refund/release
     """
 
     permission_classes = [permissions.IsAdminUser]
@@ -361,6 +365,12 @@ class AdminCryptoOrderActionView(APIView):
         'reject': crypto_orders.admin_reject_order,
         'confirm_deposit': crypto_orders.admin_confirm_sell_deposit,
         'retry': crypto_orders.admin_retry_buy,
+        'confirm_executed': lambda order, note: crypto_orders.admin_resolve_unknown_order(
+            order, note, executed=True
+        ),
+        'confirm_not_executed': lambda order, note: crypto_orders.admin_resolve_unknown_order(
+            order, note, executed=False
+        ),
     }
 
     def post(self, request, reference):

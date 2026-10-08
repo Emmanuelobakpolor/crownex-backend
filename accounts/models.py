@@ -59,6 +59,10 @@ class User(AbstractBaseUser, PermissionsMixin):
     )
     has_transaction_pin = models.BooleanField(default=False)
     transaction_pin_hash = models.CharField(max_length=128, blank=True)
+    auto_convert_crypto_deposits = models.BooleanField(
+        default=False,
+        help_text='Sell incoming on-chain crypto deposits to NGN at the live rate.',
+    )
 
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)

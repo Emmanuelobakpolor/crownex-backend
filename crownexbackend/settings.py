@@ -342,6 +342,10 @@ RELOADLY_WEBHOOK_SECRET = os.environ.get('RELOADLY_WEBHOOK_SECRET', '')
 QUIDAX_SECRET_KEY = os.environ.get('QUIDAX_SECRET_KEY', '')
 QUIDAX_USER_ID = os.environ.get('QUIDAX_USER_ID', 'me')
 QUIDAX_WEBHOOK_SECRET = os.environ.get('QUIDAX_WEBHOOK_SECRET', '')
+# The master account's real Quidax user id (from GET /users/me) — the
+# fund_uid deposits are swept to. 'me' only works in a URL path, not as a
+# transfer destination. Left blank, it's looked up once per process.
+QUIDAX_MASTER_ACCOUNT_ID = os.environ.get('QUIDAX_MASTER_ACCOUNT_ID', '')
 
 # Dojah — identity verification (KYC) for virtual card eligibility.
 # Secret key is server-only; never sent to the Flutter app. Sandbox first

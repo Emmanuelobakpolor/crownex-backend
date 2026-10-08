@@ -190,6 +190,10 @@ class CryptoOrder(models.Model):
     deposit_address = models.CharField(max_length=255, blank=True)  # sell, waiting_deposit
     payment_proof = models.ImageField(upload_to='crypto_proofs/', null=True, blank=True)
     flw_tx_ref = models.CharField(max_length=64, blank=True)
+    # Quidax timed out / 5xx'd on a market order, so it may or may not have
+    # executed. Status stays processing, balances stay held, until an admin
+    # checks Quidax and resolves it (orders.admin_resolve_unknown_order).
+    needs_review = models.BooleanField(default=False)
 
     note = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -284,6 +288,82 @@ class CryptoDepositEvent(models.Model):
 
     def __str__(self):
         return f'deposit {self.quidax_deposit_id}: {self.amount} {self.coin.upper()} -> {self.user.email}'
+
+
+class SettlementStatus(models.TextChoices):
+    """Lifecycle of one deposit's settlement (see crypto/settlements.py):
+      pending -> sweeping -> swept -> completed                (hold)
+      pending -> sweeping -> swept -> selling -> completed     (auto-convert)
+                                   \\-> skipped                 (below min sell)
+    failed is terminal and needs an admin; every other failure retries
+    from the last confirmed state instead of repeating an external step."""
+
+    PENDING = 'pending', 'Pending sweep'
+    SWEEPING = 'sweeping', 'Sweeping'
+    SWEPT = 'swept', 'Swept to master'
+    SELLING = 'selling', 'Selling'
+    COMPLETED = 'completed', 'Completed'
+    SKIPPED = 'skipped', 'Conversion skipped'
+    FAILED = 'failed', 'Failed'
+
+
+class CryptoDepositSettlement(models.Model):
+    """One per credited deposit — moves the coins from the user's Quidax
+    sub-account to the master account (where every sell, swap and withdrawal
+    actually executes), then, if the user had auto-convert on at deposit
+    time, sells them to NGN.
+
+    `reserved` tracks whether `amount` is currently held in the user's
+    CryptoWallet.reserved for this conversion, so releasing or debiting it
+    can only ever happen once. Also the work queue: the worker picks up
+    rows in a non-terminal state whose next_attempt_at has passed."""
+
+    deposit = models.OneToOneField(
+        CryptoDepositEvent, on_delete=models.PROTECT, related_name='settlement'
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='crypto_deposit_settlements'
+    )
+    coin = models.CharField(max_length=10)
+    amount = models.DecimalField(max_digits=24, decimal_places=8)
+    auto_convert = models.BooleanField(default=False)
+    reserved = models.BooleanField(default=False)
+    status = models.CharField(
+        max_length=16, choices=SettlementStatus.choices, default=SettlementStatus.PENDING
+    )
+
+    sweep_attempt = models.PositiveIntegerField(default=0)
+    sweep_reference = models.CharField(max_length=64, blank=True, db_index=True)
+    quidax_sweep_id = models.CharField(max_length=64, blank=True)
+    swept_at = models.DateTimeField(null=True, blank=True)  # set only once Quidax reports done
+    step_started_at = models.DateTimeField(null=True, blank=True)  # current sweep/sell sent at
+    order = models.ForeignKey(
+        CryptoOrder, null=True, blank=True, on_delete=models.SET_NULL, related_name='+'
+    )
+
+    attempts = models.PositiveIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(default=timezone.now)
+    last_error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['status', 'next_attempt_at'])]
+
+    def __str__(self):
+        return f'settlement {self.pk}: {self.amount} {self.coin.upper()} ({self.status}) — {self.user.email}'
+
+
+class CryptoDepositSettlementLog(models.Model):
+    settlement = models.ForeignKey(
+        CryptoDepositSettlement, on_delete=models.CASCADE, related_name='logs'
+    )
+    event = models.CharField(max_length=64)
+    detail = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
 
 
 def generate_withdrawal_reference() -> str:

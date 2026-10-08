@@ -101,6 +101,7 @@ class AdminCryptoOrderSerializer(serializers.ModelSerializer):
             'status',
             'quidax_order_id',
             'payment_proof',
+            'needs_review',
             'note',
             'created_at',
             'updated_at',
@@ -117,7 +118,16 @@ class AdminCryptoOrderSerializer(serializers.ModelSerializer):
 
 
 class AdminCryptoOrderActionSerializer(serializers.Serializer):
-    action = serializers.ChoiceField(choices=['approve', 'reject', 'confirm_deposit', 'retry'])
+    action = serializers.ChoiceField(
+        choices=[
+            'approve',
+            'reject',
+            'confirm_deposit',
+            'retry',
+            'confirm_executed',
+            'confirm_not_executed',
+        ]
+    )
     note = serializers.CharField(required=False, allow_blank=True, default='')
 
 

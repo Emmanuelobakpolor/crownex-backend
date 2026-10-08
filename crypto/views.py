@@ -16,12 +16,13 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from . import deposits, orders, services, withdrawals
+from . import deposits, orders, services, settlements, withdrawals
 from .models import OrderStatus
 from .serializers import (
     CryptoOrderSerializer,
     CryptoQuoteRequestSerializer,
     CryptoQuoteSerializer,
+    CryptoSettingsSerializer,
     CryptoWalletSerializer,
     CryptoWithdrawalSerializer,
     DepositAddressSerializer,
@@ -293,6 +294,23 @@ class EnsureAccountView(APIView):
             return Response({'ready': False})
 
 
+class CryptoSettingsView(APIView):
+    """GET/PATCH /api/crypto/settings/ — { auto_convert_deposits: bool }.
+    Applies to deposits that arrive after the change; one already in
+    flight keeps the setting it arrived with."""
+
+    def get(self, request):
+        return Response({'auto_convert_deposits': request.user.auto_convert_crypto_deposits})
+
+    def patch(self, request):
+        serializer = CryptoSettingsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = request.user
+        user.auto_convert_crypto_deposits = serializer.validated_data['auto_convert_deposits']
+        user.save(update_fields=['auto_convert_crypto_deposits', 'updated_at'])
+        return Response({'auto_convert_deposits': user.auto_convert_crypto_deposits})
+
+
 def _quidax_signature_valid(secret: str, sig_header: str, raw_body: bytes) -> bool:
     """Check a `quidax-signature: t=<timestamp>,s=<signature>` header, where
     signature = hex HMAC-SHA256(secret, "<timestamp>.<JSON.stringify(body)>").
@@ -363,10 +381,11 @@ class QuidaxWebhookView(APIView):
             deposits.handle_address_generated_webhook(request.data)
         elif event in ('order.done', 'order.completed'):
             deposits.handle_order_webhook(request.data)
-        elif event == 'withdraw.successful':
-            withdrawals.handle_withdraw_webhook(request.data, rejected=False)
-        elif event == 'withdraw.rejected':
-            withdrawals.handle_withdraw_webhook(request.data, rejected=True)
+        elif event in ('withdraw.successful', 'withdraw.rejected'):
+            rejected = event == 'withdraw.rejected'
+            # Deposit sweeps (sub-account -> master) arrive as withdraw.* too.
+            if not settlements.handle_sweep_webhook(request.data, rejected=rejected):
+                withdrawals.handle_withdraw_webhook(request.data, rejected=rejected)
 
         return Response({'status': 'ok'})
 

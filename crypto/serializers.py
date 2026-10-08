@@ -181,3 +181,7 @@ class WithdrawRequestSerializer(serializers.Serializer):
 class WithdrawEstimateSerializer(serializers.Serializer):
     coin = serializers.CharField(max_length=10)
     amount = serializers.DecimalField(max_digits=24, decimal_places=8, min_value=Decimal('0'))
+
+
+class CryptoSettingsSerializer(serializers.Serializer):
+    auto_convert_deposits = serializers.BooleanField()

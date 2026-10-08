@@ -17,9 +17,10 @@ import logging
 import time
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
 
-from . import quidax
+from . import quidax, settlements
 from .models import CryptoDepositAddress, CryptoDepositEvent, CryptoOrder, OrderStatus, QuidaxSubAccount
 from .orders import _log as _log_order_event
 from .quidax import QuidaxError
@@ -249,6 +250,9 @@ def handle_deposit_webhook(payload: dict) -> None:
     )
 
     sub_account = QuidaxSubAccount.objects.filter(quidax_user_id=quidax_user_id).first()
+    if not sub_account and quidax_user_id and quidax_user_id == settings.QUIDAX_MASTER_ACCOUNT_ID:
+        logger.info('Quidax deposit %s landed on the master account (a sweep) — nothing to credit.', data.get('id'))
+        return
     if not sub_account:
         logger.error(
             'Quidax deposit %s for unknown sub-account %r — not credited.',
@@ -286,6 +290,9 @@ def _credit_deposit(user, data: dict) -> bool:
         if created:
             credit_crypto_available(user, currency, Decimal(str(amount)))
             logger.info('Credited deposit %s: %s %s -> %s', quidax_deposit_id, amount, currency, user.email)
+            # Queues the sweep (and auto-convert, if on) for the worker —
+            # committed with the credit, executed outside this request.
+            settlements.create_for_deposit(_event)
     return created
 
 
