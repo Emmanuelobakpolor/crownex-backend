@@ -807,10 +807,12 @@ def admin_resolve_unknown_order(order: CryptoOrder, note: str = '', *, executed:
 
 def admin_resolve_failed_swap(order: CryptoOrder, note: str = '', *, credit: str) -> CryptoOrder:
     """Compensates a swap whose sell leg executed but whose buy leg failed —
-    the source coin is gone and nothing was credited. credit='to_coin' gives
-    the user the destination coin the quote promised (and completes the
-    order); credit='ngn' pays the swap's net NGN value (notional - fee) into
-    their wallet instead. Runs at most once per order."""
+    the source coin is gone and nothing was credited. credit='to_coin' BUYS
+    the destination coin on the Quidax master account and credits the user
+    only once that buy fills, so the balance is always backed by real coin;
+    credit='ngn' pays the swap's net NGN value (notional - fee) into their
+    wallet — the NGN from the sell leg is already in the master account.
+    Runs at most once per order."""
     if order.order_type != OrderType.SWAP or order.status != OrderStatus.FAILED:
         raise CryptoServiceError('Only failed swap orders can be resolved this way.', code='invalid_state')
     if credit not in ('to_coin', 'ngn'):
@@ -818,27 +820,68 @@ def admin_resolve_failed_swap(order: CryptoOrder, note: str = '', *, credit: str
 
     with transaction.atomic():
         locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
-        events = set(locked.logs.values_list('event', flat=True))
-        if events & {'admin_swap_compensated', 'swap_refunded_ngn'}:
+        events = list(locked.logs.values_list('event', flat=True))
+        if {'admin_swap_compensated', 'swap_refunded_ngn'} & set(events):
             raise CryptoServiceError('This swap has already been compensated.', code='already_resolved')
         if 'reservation_debited_needs_review' not in events:
             raise CryptoServiceError(
                 'This swap never sold its source coin — nothing to compensate.', code='invalid_state'
             )
+        if events.count('admin_swap_buy_started') > events.count('admin_swap_buy_failed'):
+            # A Credit coin buy is in flight, or its outcome is unknown —
+            # paying out anything else now could pay the user twice.
+            raise CryptoServiceError(
+                'A Quidax buy for this swap is in progress or its outcome is unknown. Check the '
+                'Quidax master account order history before doing anything else.',
+                code='buy_pending',
+            )
 
-        if credit == 'to_coin':
-            credit_crypto_available(locked.user, locked.to_coin, locked.to_coin_amount)
-            locked.status = OrderStatus.COMPLETED
-            locked.note = ''
-            locked.save(update_fields=['status', 'note', 'updated_at'])
-            detail = f'Credited {locked.to_coin_amount} {locked.to_coin.upper()} to wallet.'
-        else:
+        if credit == 'ngn':
             net_ngn = _swap_net_ngn(locked)
             credit_wallet(locked.user, net_ngn)
             locked.note = f'Compensated with ₦{net_ngn} after the buy leg failed.'
             locked.save(update_fields=['note', 'updated_at'])
-            detail = f'Credited ₦{net_ngn} to NGN wallet.'
-        _log(locked, 'admin_swap_compensated', f'{detail} {note}'.strip())
+            _log(locked, 'admin_swap_compensated', f'Credited ₦{net_ngn} to NGN wallet. {note}'.strip())
+            order.refresh_from_db()
+            return order
 
+        # Claim the buy before calling Quidax so a double click can't buy twice.
+        _log(
+            locked,
+            'admin_swap_buy_started',
+            f'Buying {locked.to_coin_amount} {locked.to_coin.upper()} on Quidax. {note}'.strip(),
+        )
+
+    to_market = f'{order.to_coin}ngn'
+    try:
+        payload, bought = _market_buy_fitting_precision(to_market, order.to_coin_amount)
+    except QuidaxError as exc:
+        if _outcome_unknown(exc):
+            _log(order, 'admin_swap_buy_unknown', f'Quidax did not answer: {exc.message}')
+            raise CryptoServiceError(
+                f'Quidax did not answer ({exc.message}). Check the master account order history: if '
+                f'{order.to_coin.upper()} was bought, credit it by hand; nothing was credited here.',
+                code='outcome_unknown',
+                status=502,
+            )
+        _log(order, 'admin_swap_buy_failed', exc.message)
+        raise CryptoServiceError(
+            f'Quidax refused the {order.to_coin.upper()} buy: {exc.message}. Nothing was credited — '
+            'try again later or use Refund NGN.',
+            code='quidax_refused',
+        )
+
+    buy_order_id = str((payload.get('data') or {}).get('id') or '')
+    _log(
+        order,
+        'quidax_buy_leg_sent',
+        f'market={to_market} volume={_plain_decimal(bought)} quidax_order_id={buy_order_id} (admin)',
+    )
+    order = _complete_swap(order, buy_order_id, debit_source=False, bought=bought)
+    _log(
+        order,
+        'admin_swap_compensated',
+        f'Bought and credited {order.to_coin_amount} {order.to_coin.upper()}. {note}'.strip(),
+    )
     order.refresh_from_db()
     return order

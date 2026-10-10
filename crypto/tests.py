@@ -714,6 +714,51 @@ class UnknownOutcomeTests(SettlementTestBase):
         self.assertEqual(self.crypto(coin='btc').available, Decimal('9'))
         self.assertEqual(self.ngn(), Decimal('1350.00'), '0.9 BTC remainder paid in NGN')
 
+    def _legacy_failed_swap(self):
+        """A swap failed by the old code: sell leg done, source debited, buy
+        leg refused, nothing credited — left for an admin."""
+        self.q.sell_errors = [None, QuidaxError('Quidax returned 502.', status_code=502)]
+        order = self._swap()
+        order.status, order.needs_review = OrderStatus.FAILED, False
+        order.save(update_fields=['status', 'needs_review'])
+        order.logs.create(event='reservation_debited_needs_review', detail='')
+        return order
+
+    def test_admin_credit_coin_buys_on_quidax_before_crediting(self):
+        order = self._legacy_failed_swap()
+        orders_before = len(self.q.orders)
+        order = admin_resolve_failed_swap(order, 'fix', credit='to_coin')
+        self.assertEqual(order.status, OrderStatus.COMPLETED)
+        self.assertEqual(len(self.q.orders), orders_before + 1)
+        self.assertEqual(self.q.orders[-1]['side'], 'buy')
+        self.assertEqual(self.q.orders[-1]['market'], 'btcngn')
+        self.assertEqual(self.crypto(coin='btc').available, order.to_coin_amount)
+        with self.assertRaises(CryptoServiceError):
+            admin_resolve_failed_swap(order, credit='to_coin')
+        self.assertEqual(self.crypto(coin='btc').available, order.to_coin_amount)
+
+    def test_admin_credit_coin_refused_by_quidax_credits_nothing_and_can_retry(self):
+        order = self._legacy_failed_swap()
+        self.q.sell_errors = [QuidaxError('Insufficient account balance', status_code=422)]
+        with self.assertRaises(CryptoServiceError):
+            admin_resolve_failed_swap(order, credit='to_coin')
+        self.assertFalse(CryptoWallet.objects.filter(user=self.user, coin='btc', available__gt=0).exists())
+        order.refresh_from_db()
+        self.assertEqual(order.status, OrderStatus.FAILED)
+
+        order = admin_resolve_failed_swap(order, credit='to_coin')
+        self.assertEqual(order.status, OrderStatus.COMPLETED)
+
+    def test_admin_credit_coin_unknown_outcome_blocks_other_payouts(self):
+        order = self._legacy_failed_swap()
+        self.q.sell_errors = [QuidaxError('Could not reach Quidax: timeout')]
+        with self.assertRaises(CryptoServiceError):
+            admin_resolve_failed_swap(order, credit='to_coin')
+        order.refresh_from_db()
+        with self.assertRaises(CryptoServiceError):
+            admin_resolve_failed_swap(order, credit='ngn')
+        self.assertEqual(self.ngn(), Decimal('0'))
+
     def test_only_flagged_orders_can_be_resolved(self):
         order = self._sell()
         self.assertEqual(order.status, OrderStatus.COMPLETED)

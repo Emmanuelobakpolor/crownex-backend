@@ -633,7 +633,7 @@ class AdminMasterBalancesView(APIView):
                     'coin': coin,
                     'name': crypto_services.SUPPORTED_COINS.get(coin, {}).get('name')
                     or ('Naira' if coin == 'ngn' else coin.upper()),
-                    'supported': coin in crypto_services.SUPPORTED_COINS,
+                    'supported': coin == 'ngn' or coin in crypto_services.SUPPORTED_COINS,
                     'on_quidax': coin in on_quidax,
                     'master_balance': str(balance),
                     'master_locked': str(locked),
