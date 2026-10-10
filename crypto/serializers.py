@@ -90,6 +90,7 @@ class CryptoQuoteSerializer(serializers.ModelSerializer):
 
 class CryptoOrderSerializer(serializers.ModelSerializer):
     payment_proof = serializers.SerializerMethodField()
+    refunded_ngn = serializers.SerializerMethodField()
 
     class Meta:
         model = CryptoOrder
@@ -108,10 +109,23 @@ class CryptoOrderSerializer(serializers.ModelSerializer):
             'status',
             'payment_proof',
             'note',
+            'refunded_ngn',
             'created_at',
             'updated_at',
         ]
         read_only_fields = fields
+
+    def get_refunded_ngn(self, obj: CryptoOrder) -> str | None:
+        """NGN paid to the user's wallet in place of a swap's destination coin
+        (the buy leg failed after the sell leg went through) — the app shows
+        this as a refund rather than a plain failure."""
+        if obj.order_type != 'swap' or obj.status != 'failed':
+            return None
+        if not obj.logs.filter(event__in=['swap_refunded_ngn', 'admin_swap_compensated']).exists():
+            return None
+        from .orders import _swap_net_ngn
+
+        return str(_swap_net_ngn(obj))
 
     def get_payment_proof(self, obj: CryptoOrder):
         if not obj.payment_proof:

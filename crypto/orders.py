@@ -494,7 +494,12 @@ def _execute_quidax_swap(order: CryptoOrder) -> CryptoOrder:
             'reservation_released',
             f'Released {order.coin_amount} {order.coin.upper()} back to available.',
         )
-        return _fail_order(order, f'Swap sell leg failed: {exc.message}', refund_ngn=False)
+        return _fail_order(
+            order,
+            f"We couldn't complete your swap right now. Your {order.coin.upper()} was not used "
+            'and is back in your balance. Please try again later.',
+            refund_ngn=False,
+        )
 
     sell_data = sell_payload.get('data') or {}
     sell_order_id = str(sell_data.get('id') or '')
@@ -557,8 +562,8 @@ def _refund_failed_swap_as_ngn(order: CryptoOrder, reason: str) -> CryptoOrder:
     for an admin. The source coin must already be debited."""
     net_ngn = _swap_net_ngn(order)
     note = (
-        f'Could not buy {order.to_coin.upper()} ({reason}). '
-        f'₦{net_ngn} was credited to your NGN wallet instead.'
+        f"We couldn't buy {order.to_coin.upper()} right now, so the value of your "
+        f'{order.coin.upper()} (₦{net_ngn}) was added to your NGN wallet instead.'
     )
     with transaction.atomic():
         locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
@@ -636,7 +641,7 @@ def place_swap_order(
         reserve_crypto(user, order.coin, order.coin_amount)
     except CryptoServiceError:
         return _fail_order(
-            order, f'Insufficient {order.coin.upper()} balance for swap.', refund_ngn=False
+            order, f"You don't have enough {order.coin.upper()} for this swap.", refund_ngn=False
         )
 
     _log(order, 'reserved_balance', f'Reserved {order.coin_amount} {order.coin.upper()}.')
