@@ -885,3 +885,54 @@ def admin_resolve_failed_swap(order: CryptoOrder, note: str = '', *, credit: str
     )
     order.refresh_from_db()
     return order
+
+
+# ─── TEMPORARY: reverse unbacked "Credit coin" payouts ─────────────────────
+# Before Credit coin bought on Quidax, it credited the coin without buying
+# it, leaving user balances the master account doesn't hold. This turns such
+# a credit back into the swap's NGN value. Remove once those are cleaned up
+# (also: 'swap_convert_ngn' in adminpanel views/serializers + CryptoOps.tsx).
+
+
+def admin_convert_unbacked_swap_credit(order: CryptoOrder, note: str = '') -> CryptoOrder:
+    from .models import CryptoWallet
+
+    with transaction.atomic():
+        locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
+        events = set(locked.logs.values_list('event', flat=True))
+        if (
+            locked.order_type != OrderType.SWAP
+            or locked.status != OrderStatus.COMPLETED
+            or 'admin_swap_compensated' not in events
+            or 'admin_swap_buy_started' in events  # bought on Quidax: backed, leave it
+            or 'swap_refunded_ngn' in events
+        ):
+            raise CryptoServiceError(
+                'Only swaps credited by the old Credit coin (coin never bought) can be converted.',
+                code='invalid_state',
+            )
+        wallet = CryptoWallet.objects.select_for_update().get(user=locked.user, coin=locked.to_coin)
+        if wallet.available < locked.to_coin_amount:
+            raise CryptoServiceError(
+                f'User only has {wallet.available} {locked.to_coin.upper()} available '
+                f'(needs {locked.to_coin_amount}) — they may have spent or moved it.',
+                code='insufficient_balance',
+            )
+        wallet.available -= locked.to_coin_amount
+        wallet.save(update_fields=['available', 'updated_at'])
+        net_ngn = _swap_net_ngn(locked)
+        credit_wallet(locked.user, net_ngn)
+        locked.status = OrderStatus.FAILED
+        locked.note = f'Converted to ₦{net_ngn} ({locked.to_coin.upper()} was never bought on Quidax).'
+        locked.save(update_fields=['status', 'note', 'updated_at'])
+        _log(
+            locked,
+            'swap_refunded_ngn',
+            f'Reversed {locked.to_coin_amount} {locked.to_coin.upper()} credit; credited ₦{net_ngn} '
+            f'to NGN wallet. {note}'.strip(),
+        )
+    order.refresh_from_db()
+    return order
+
+
+# ─── END TEMPORARY ──────────────────────────────────────────────────────────

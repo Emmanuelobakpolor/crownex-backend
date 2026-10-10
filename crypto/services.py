@@ -61,7 +61,9 @@ def check_transaction_pin(user, pin: str) -> None:
 # Flutter-side kSupportedCryptoCoins/kCryptoCoinNetworks) together — all
 # three need to agree on what's actually supported.
 SUPPORTED_COINS: dict[str, dict] = {
-    # Direct NGN markets
+    # Only coins with a direct {coin}ngn market on Quidax: buy, sell and swap
+    # all trade there. Coins Quidax lists only against USDT (BNB, ADA, DOGE,
+    # TON, ...) were removed — every buy/swap into them failed.
     'btc': {'name': 'Bitcoin', 'market': 'btcngn', 'color': '#F7931A'},
     'eth': {'name': 'Ethereum', 'market': 'ethngn', 'color': '#627EEA'},
     'usdt': {'name': 'Tether', 'market': 'usdtngn', 'color': '#26A17B'},
@@ -71,24 +73,6 @@ SUPPORTED_COINS: dict[str, dict] = {
     'ltc': {'name': 'Litecoin', 'market': 'ltcngn', 'color': '#345D9D'},
     'trx': {'name': 'TRON', 'market': 'trxngn', 'color': '#EF0027'},
     'dash': {'name': 'Dash', 'market': 'dashngn', 'color': '#008CE7'},
-    # Via USDT bridge (no direct NGN market on Quidax)
-    'bnb': {'name': 'BNB', 'market': 'bnbusdt', 'via_usdt': True, 'color': '#F3BA2F'},
-    'ada': {'name': 'Cardano', 'market': 'adausdt', 'via_usdt': True, 'color': '#0033AD'},
-    'dot': {'name': 'Polkadot', 'market': 'dotusdt', 'via_usdt': True, 'color': '#E6007A'},
-    'link': {'name': 'Chainlink', 'market': 'linkusdt', 'via_usdt': True, 'color': '#2A5ADA'},
-    'doge': {'name': 'Dogecoin', 'market': 'dogeusdt', 'via_usdt': True, 'color': '#C2A633'},
-    'bch': {'name': 'Bitcoin Cash', 'market': 'bchusdt', 'via_usdt': True, 'color': '#8DC351'},
-    'etc': {'name': 'Ethereum Classic', 'market': 'etcusdt', 'via_usdt': True, 'color': '#328332'},
-    'xlm': {'name': 'Stellar', 'market': 'xlmusdt', 'via_usdt': True, 'color': '#14B6E7'},
-    'near': {'name': 'NEAR Protocol', 'market': 'nearusdt', 'via_usdt': True, 'color': '#000000'},
-    'sui': {'name': 'Sui', 'market': 'suiusdt', 'via_usdt': True, 'color': '#4DA2FF'},
-    'ton': {'name': 'Toncoin', 'market': 'tonusdt', 'via_usdt': True, 'color': '#0088CC'},
-    'fil': {'name': 'Filecoin', 'market': 'filusdt', 'via_usdt': True, 'color': '#0090FF'},
-    'algo': {'name': 'Algorand', 'market': 'algousdt', 'via_usdt': True, 'color': '#000000'},
-    'sand': {'name': 'The Sandbox', 'market': 'sandusdt', 'via_usdt': True, 'color': '#00ADEF'},
-    'shib': {'name': 'Shiba Inu', 'market': 'shibusdt', 'via_usdt': True, 'color': '#FFA409'},
-    'aave': {'name': 'Aave', 'market': 'aaveusdt', 'via_usdt': True, 'color': '#B6509E'},
-    'pol': {'name': 'Polygon', 'market': 'polusdt', 'via_usdt': True, 'color': '#8247E5'},
 }
 
 
@@ -138,18 +122,11 @@ def _market_last_price(tickers: dict, market: str) -> Decimal | None:
 
 
 def _resolve_rate(tickers: dict, coin: str) -> Decimal | None:
-    meta = SUPPORTED_COINS[coin]
-    if meta.get('via_usdt'):
-        usdt_price = _market_last_price(tickers, meta['market'])
-        usdt_ngn = _market_last_price(tickers, 'usdtngn')
-        if usdt_price is None or usdt_ngn is None:
-            return None
-        return usdt_price * usdt_ngn
-    return _market_last_price(tickers, meta['market'])
+    return _market_last_price(tickers, SUPPORTED_COINS[coin]['market'])
 
 
 def get_coin_rate_ngn(coin: str) -> Decimal:
-    """Resolve a single coin's live NGN rate — direct NGN market first, else via USDT."""
+    """Resolve a single coin's live NGN rate from its NGN market."""
     coin = coin.lower()
     if coin not in SUPPORTED_COINS:
         raise CryptoServiceError('Unsupported coin.', code='unsupported_coin')

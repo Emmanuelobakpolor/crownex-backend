@@ -384,6 +384,8 @@ class AdminCryptoOrderActionView(APIView):
         'swap_refund_ngn': lambda order, note: crypto_orders.admin_resolve_failed_swap(
             order, note, credit='ngn'
         ),
+        # TEMPORARY — see admin_convert_unbacked_swap_credit
+        'swap_convert_ngn': crypto_orders.admin_convert_unbacked_swap_credit,
     }
 
     def post(self, request, reference):
@@ -616,7 +618,9 @@ class AdminMasterBalancesView(APIView):
 
         rows = []
         coins = ['ngn', *crypto_services.SUPPORTED_COINS]
-        coins += sorted(c for c in on_quidax if c not in coins and dec(on_quidax[c].get('balance')) > 0)
+        extra = {c for c in on_quidax if dec(on_quidax[c].get('balance')) > 0}
+        extra |= {c for c, o in owed.items() if (o['available'] or 0) + (o['reserved'] or 0) > 0}
+        coins += sorted(extra - set(coins))
         for coin in coins:
             q = on_quidax.get(coin, {})
             balance, locked = dec(q.get('balance')), dec(q.get('locked'))

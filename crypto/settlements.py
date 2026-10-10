@@ -140,9 +140,9 @@ def master_account_id() -> str:
 
 
 def _has_ngn_market(coin: str) -> bool:
-    """Sells go through the {coin}ngn market (orders.send_master_sell); coins
-    Quidax only lists against USDT have none."""
-    return not SUPPORTED_COINS.get(coin, {}).get('via_usdt')
+    """Sells go through the {coin}ngn market (orders.send_master_sell); only
+    SUPPORTED_COINS are known to have one."""
+    return coin in SUPPORTED_COINS
 
 
 # ─── Creation (called from the deposit webhook's transaction) ───────────────

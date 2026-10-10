@@ -27,7 +27,7 @@ from .models import (
     QuoteType,
     SettlementStatus,
 )
-from .orders import admin_resolve_failed_swap, admin_resolve_unknown_order, place_buy_order, place_sell_order, place_swap_order
+from .orders import admin_convert_unbacked_swap_credit, admin_resolve_failed_swap, admin_resolve_unknown_order, place_buy_order, place_sell_order, place_swap_order
 from .quidax import QuidaxError
 from .services import CryptoServiceError, create_quote
 
@@ -758,6 +758,29 @@ class UnknownOutcomeTests(SettlementTestBase):
         with self.assertRaises(CryptoServiceError):
             admin_resolve_failed_swap(order, credit='ngn')
         self.assertEqual(self.ngn(), Decimal('0'))
+
+    def test_temporary_convert_unbacked_credit_to_ngn(self):
+        order = self._legacy_failed_swap()
+        # What the old Credit coin did: credit the coin with no Quidax buy.
+        CryptoWallet.objects.update_or_create(
+            user=self.user, coin='btc', defaults={'available': order.to_coin_amount}
+        )
+        order.status = OrderStatus.COMPLETED
+        order.save(update_fields=['status'])
+        order.logs.create(event='admin_swap_compensated', detail='old credit')
+
+        order = admin_convert_unbacked_swap_credit(order)
+        self.assertEqual(order.status, OrderStatus.FAILED)
+        self.assertEqual(self.crypto(coin='btc').available, Decimal('0'))
+        self.assertEqual(self.ngn(), order.total_ngn - order.fee_ngn)
+        with self.assertRaises(CryptoServiceError):
+            admin_convert_unbacked_swap_credit(order)
+        self.assertEqual(self.ngn(), order.total_ngn - order.fee_ngn)
+
+    def test_temporary_convert_refuses_coin_bought_on_quidax(self):
+        order = admin_resolve_failed_swap(self._legacy_failed_swap(), credit='to_coin')
+        with self.assertRaises(CryptoServiceError):
+            admin_convert_unbacked_swap_credit(order)
 
     def test_only_flagged_orders_can_be_resolved(self):
         order = self._sell()
