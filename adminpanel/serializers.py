@@ -100,6 +100,11 @@ class AdminCryptoOrderSerializer(serializers.ModelSerializer):
             'total_ngn',
             'status',
             'quidax_order_id',
+            'swap_method',
+            'gross_to_amount',
+            'fee_to_coin',
+            'quidax_swap_quotation_id',
+            'quidax_swap_id',
             'payment_proof',
             'needs_review',
             'note',
@@ -128,6 +133,7 @@ class AdminCryptoOrderActionSerializer(serializers.Serializer):
             'confirm_not_executed',
             'swap_credit_coin',
             'swap_refund_ngn',
+            'check_quidax',
         ]
     )
     note = serializers.CharField(required=False, allow_blank=True, default='')

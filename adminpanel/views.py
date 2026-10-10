@@ -363,6 +363,7 @@ class AdminCryptoOrderActionView(APIView):
       confirm_not_executed  order held for review: Quidax did NOT -> refund/release
       swap_credit_coin      failed swap, sell leg done: credit the promised destination coin
       swap_refund_ngn       failed swap, sell leg done: credit its net NGN value instead
+      check_quidax          processing instant swap: ask Quidax for its outcome and apply it
     """
 
     permission_classes = [permissions.IsAdminUser]
@@ -384,6 +385,7 @@ class AdminCryptoOrderActionView(APIView):
         'swap_refund_ngn': lambda order, note: crypto_orders.admin_resolve_failed_swap(
             order, note, credit='ngn'
         ),
+        'check_quidax': crypto_orders.admin_check_instant_swap,
     }
 
     def post(self, request, reference):
@@ -615,7 +617,7 @@ class AdminMasterBalancesView(APIView):
                 return Decimal('0')
 
         rows = []
-        coins = ['ngn', *crypto_services.SUPPORTED_COINS]
+        coins = ['ngn', *crypto_services.all_coins()]
         extra = {c for c in on_quidax if dec(on_quidax[c].get('balance')) > 0}
         extra |= {c for c, o in owed.items() if (o['available'] or 0) + (o['reserved'] or 0) > 0}
         coins += sorted(extra - set(coins))
@@ -633,9 +635,8 @@ class AdminMasterBalancesView(APIView):
             rows.append(
                 {
                     'coin': coin,
-                    'name': crypto_services.SUPPORTED_COINS.get(coin, {}).get('name')
-                    or ('Naira' if coin == 'ngn' else coin.upper()),
-                    'supported': coin == 'ngn' or coin in crypto_services.SUPPORTED_COINS,
+                    'name': 'Naira' if coin == 'ngn' else crypto_services.coin_name(coin),
+                    'supported': coin == 'ngn' or coin in crypto_services.all_coins(),
                     'on_quidax': coin in on_quidax,
                     'master_balance': str(balance),
                     'master_locked': str(locked),

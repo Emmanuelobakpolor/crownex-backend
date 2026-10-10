@@ -17,7 +17,7 @@ import time
 from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections
 
-from crypto import settlements
+from crypto import orders, settlements
 from crypto.models import CryptoDepositSettlement, SettlementStatus
 from crypto.services import CryptoServiceError
 
@@ -53,11 +53,18 @@ class Command(BaseCommand):
             self.stdout.write(f'Settlement {s.pk} is now {s.status}.')
             return
 
+        last_swap_check = 0.0
         while True:
             close_old_connections()
             processed = settlements.process_due()
             if processed:
                 self.stdout.write(f'Processed {processed} settlement(s).')
+            # Instant swaps whose outcome never reached us — once a minute.
+            if time.monotonic() - last_swap_check >= 60:
+                last_swap_check = time.monotonic()
+                for order, before in orders.reconcile_due_instant_swaps():
+                    if order.status != before:
+                        self.stdout.write(f'Instant swap {order.reference}: {before} -> {order.status}')
             if not options['loop']:
                 return
             time.sleep(options['interval'])

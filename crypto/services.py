@@ -10,7 +10,7 @@ Quotes, wallets, and order execution land in subsequent phases.
 
 from __future__ import annotations
 
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_UP, Decimal, InvalidOperation
 
 from django.conf import settings
 from django.core.cache import cache
@@ -18,7 +18,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from . import quidax
-from .models import CryptoFeeSettings, CryptoQuote, CryptoWallet, FeeType, QuoteType
+from .models import CryptoFeeSettings, CryptoQuote, CryptoWallet, FeeType, QuoteType, SwapMethod
 from .quidax import QuidaxError
 
 _TICKERS_CACHE_KEY = 'crypto:quidax:tickers'
@@ -75,6 +75,66 @@ SUPPORTED_COINS: dict[str, dict] = {
     'dash': {'name': 'Dash', 'market': 'dashngn', 'color': '#008CE7'},
 }
 
+# Coins with no NGN market that can still be swapped crypto <-> crypto via
+# Quidax Instant Swap. Only listed (and only swappable) while
+# QUIDAX_INSTANT_SWAP_ENABLED is on; each quote still asks Quidax whether
+# the exact pair converts, so an entry here is necessary, not sufficient.
+# NGN price (display, fee, minimum) = {coin}usdt * usdtngn.
+# deposit/withdraw stay False until a real deposit address and withdrawal
+# have been verified on Quidax for that coin's network — until then a user
+# who swaps in can hold the coin or swap it back out.
+SWAP_ONLY_COINS: dict[str, dict] = {
+    'bnb': {'name': 'BNB', 'usdt_market': 'bnbusdt', 'color': '#F3BA2F'},
+    'doge': {'name': 'Dogecoin', 'usdt_market': 'dogeusdt', 'color': '#C2A633'},
+    'ada': {'name': 'Cardano', 'usdt_market': 'adausdt', 'color': '#0033AD'},
+    'ton': {'name': 'Toncoin', 'usdt_market': 'tonusdt', 'color': '#0088CC'},
+    'shib': {'name': 'Shiba Inu', 'usdt_market': 'shibusdt', 'color': '#FFA409'},
+}
+
+CAPABILITIES = ('buy_sell', 'swap', 'deposit', 'withdraw')
+
+
+def instant_swap_enabled() -> bool:
+    return bool(getattr(settings, 'QUIDAX_INSTANT_SWAP_ENABLED', False))
+
+
+def all_coins() -> dict[str, dict]:
+    """Every coin the app currently offers in any form."""
+    if instant_swap_enabled():
+        return {**SUPPORTED_COINS, **SWAP_ONLY_COINS}
+    return dict(SUPPORTED_COINS)
+
+
+def coin_name(coin: str) -> str:
+    meta = SUPPORTED_COINS.get(coin) or SWAP_ONLY_COINS.get(coin) or {}
+    return meta.get('name', coin.upper())
+
+
+def coin_capabilities(coin: str) -> dict[str, bool]:
+    """What the app lets users do with a coin — buy/sell need a {coin}ngn
+    market; swap needs either that or Instant Swap."""
+    if coin in SUPPORTED_COINS:
+        return {'buy_sell': True, 'swap': True, 'deposit': True, 'withdraw': True}
+    meta = SWAP_ONLY_COINS.get(coin)
+    if meta is None or not instant_swap_enabled():
+        return dict.fromkeys(CAPABILITIES, False)
+    return {
+        'buy_sell': False,
+        'swap': True,
+        'deposit': bool(meta.get('deposit')),
+        'withdraw': bool(meta.get('withdraw')),
+    }
+
+
+def plain_decimal(amount: Decimal) -> str:
+    """Decimal as a plain string — Quidax expects '1' / '0.0011', not the
+    scientific notation ('1E+2') Python's Decimal can produce."""
+    normalized = amount.normalize()
+    _sign, _digits, exponent = normalized.as_tuple()
+    if exponent >= 0:
+        return str(int(normalized))
+    return format(normalized, 'f')
+
 
 def _logo_url(symbol: str) -> str:
     """CoinCap's icon CDN — not from Quidax, just a well-known public icon
@@ -122,13 +182,19 @@ def _market_last_price(tickers: dict, market: str) -> Decimal | None:
 
 
 def _resolve_rate(tickers: dict, coin: str) -> Decimal | None:
-    return _market_last_price(tickers, SUPPORTED_COINS[coin]['market'])
+    if coin in SUPPORTED_COINS:
+        return _market_last_price(tickers, SUPPORTED_COINS[coin]['market'])
+    usdt_price = _market_last_price(tickers, SWAP_ONLY_COINS[coin]['usdt_market'])
+    usdt_ngn = _market_last_price(tickers, 'usdtngn')
+    if usdt_price is None or usdt_ngn is None:
+        return None
+    return usdt_price * usdt_ngn
 
 
 def get_coin_rate_ngn(coin: str) -> Decimal:
-    """Resolve a single coin's live NGN rate from its NGN market."""
+    """A coin's live NGN rate — its NGN market, or via USDT for swap-only coins."""
     coin = coin.lower()
-    if coin not in SUPPORTED_COINS:
+    if coin not in all_coins():
         raise CryptoServiceError('Unsupported coin.', code='unsupported_coin')
 
     rate = _resolve_rate(_raw_tickers(), coin)
@@ -143,7 +209,7 @@ def get_prices() -> list[dict]:
     """Public price list for every supported coin, for client display."""
     tickers = _raw_tickers()
     rows = []
-    for symbol, meta in SUPPORTED_COINS.items():
+    for symbol, meta in all_coins().items():
         rate = _resolve_rate(tickers, symbol)
         rows.append(
             {
@@ -153,6 +219,9 @@ def get_prices() -> list[dict]:
                 'logo_url': _logo_url(symbol),
                 'color': meta.get('color', '#0052FF'),
                 'letter': symbol[0].upper() if symbol else '?',
+                # What the app lets users do with this coin, so the client
+                # doesn't offer e.g. "buy BNB" when BNB can only be swapped.
+                'capabilities': coin_capabilities(symbol),
             }
         )
     return rows
@@ -251,14 +320,18 @@ def debit_reserved_crypto(user, coin: str, amount: Decimal) -> CryptoWallet:
 def list_wallets(user) -> list[CryptoWallet]:
     """One row per supported coin — creates any missing ones at zero so the
     wallets screen always shows the full coin set, not just ones touched so far."""
+    coins = list(all_coins())
     existing = {w.coin: w for w in CryptoWallet.objects.filter(user=user)}
-    missing = [coin for coin in SUPPORTED_COINS if coin not in existing]
+    missing = [coin for coin in coins if coin not in existing]
     if missing:
         CryptoWallet.objects.bulk_create(
             [CryptoWallet(user=user, coin=coin) for coin in missing], ignore_conflicts=True
         )
         existing = {w.coin: w for w in CryptoWallet.objects.filter(user=user)}
-    return [existing[coin] for coin in SUPPORTED_COINS]
+    # A coin no longer offered (e.g. Instant Swap switched off) still shows
+    # while the user holds any, so a balance never silently disappears.
+    held = [w for c, w in existing.items() if c not in coins and w.total > 0]
+    return [existing[coin] for coin in coins] + held
 
 
 # ─── Quotes ─────────────────────────────────────────────────────────────────
@@ -266,11 +339,107 @@ def list_wallets(user) -> list[CryptoWallet]:
 QUOTE_TTL_SECONDS = 30
 
 
-def _validate_coin(coin: str) -> str:
+_CAPABILITY_ERRORS = {
+    'buy_sell': ('{coin} can only be swapped, not bought or sold for naira.', 'buy_sell_not_supported'),
+    'swap': ('{coin} cannot be swapped right now.', 'swap_not_supported'),
+    'deposit': ('{coin} deposits are not available yet.', 'deposit_not_supported'),
+    'withdraw': ('{coin} withdrawals are not available yet.', 'withdraw_not_supported'),
+}
+
+
+def _validate_coin(coin: str, capability: str | None = 'buy_sell') -> str:
+    """Normalizes coin and checks the app offers it for `capability`
+    (None = any coin the app knows, e.g. for admin reconciliation)."""
     coin = coin.lower()
-    if coin not in SUPPORTED_COINS:
+    if coin not in all_coins():
         raise CryptoServiceError('Unsupported coin.', code='unsupported_coin')
+    if capability and not coin_capabilities(coin)[capability]:
+        message, code = _CAPABILITY_ERRORS[capability]
+        raise CryptoServiceError(message.format(coin=coin.upper()), code=code)
     return coin
+
+
+# ─── Swap quotes ────────────────────────────────────────────────────────────
+
+
+def quidax_decimal(value) -> Decimal | None:
+    """A Quidax amount field as a Decimal, or None if missing/garbled."""
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return number if number.is_finite() else None
+
+
+def _instant_swap_gross(coin: str, to_coin: str, amount: Decimal) -> Decimal:
+    """Asks Quidax what `amount` coin converts to right now. Uses the
+    documented POST .../swap_quotation (response fields: to_amount,
+    quoted_price, expires_at) rather than temporary_swap_quotation, whose
+    response shape Quidax doesn't document. An unconfirmed quotation moves
+    nothing and expires in 15s; execution asks for a fresh one anyway.
+    Raises QuidaxError if Quidax won't quote the pair, CryptoServiceError if
+    its answer is unusable."""
+    payload = quidax.create_swap_quotation(
+        from_currency=coin,
+        to_currency=to_coin,
+        from_amount=plain_decimal(amount),
+        user_id=settings.QUIDAX_USER_ID,
+    )
+    data = payload.get('data') if isinstance(payload, dict) else None
+    data = data if isinstance(data, dict) else {}
+    gross = quidax_decimal(data.get('to_amount'))
+    if (
+        gross is None
+        or gross <= 0
+        or str(data.get('from_currency', coin)).lower() != coin
+        or str(data.get('to_currency', to_coin)).lower() != to_coin
+    ):
+        raise CryptoServiceError(
+            'Could not get a swap price right now. Please try again.',
+            code='swap_quote_invalid',
+            status=502,
+        )
+    return gross
+
+
+def swap_fee_to_coin(fee_ngn: Decimal, to_rate: Decimal) -> Decimal:
+    """Our swap fee in the destination coin — rounded UP so the user's share
+    (gross - fee) only ever rounds down, never past what Quidax delivers."""
+    return (fee_ngn / to_rate).quantize(Decimal('0.00000001'), rounding=ROUND_UP)
+
+
+def _choose_swap_route(coin: str, to_coin: str, amount: Decimal) -> tuple[str, Decimal | None]:
+    """Instant Swap when enabled and Quidax quotes the pair; otherwise the
+    two-leg NGN route if both coins have NGN markets (and, with Instant Swap
+    on, CRYPTO_SWAP_NGN_FALLBACK allows it). Returns (method, gross output
+    for instant swaps)."""
+    both_ngn = coin in SUPPORTED_COINS and to_coin in SUPPORTED_COINS
+    if not instant_swap_enabled():
+        if both_ngn:
+            return SwapMethod.NGN_TWO_LEG, None
+        raise CryptoServiceError(
+            f'{coin.upper()} to {to_coin.upper()} swaps are not supported.', code='unsupported_pair'
+        )
+
+    try:
+        return SwapMethod.INSTANT, _instant_swap_gross(coin, to_coin, amount)
+    except CryptoServiceError:
+        if both_ngn and settings.CRYPTO_SWAP_NGN_FALLBACK:
+            return SwapMethod.NGN_TWO_LEG, None
+        raise
+    except QuidaxError as exc:
+        if both_ngn and settings.CRYPTO_SWAP_NGN_FALLBACK:
+            return SwapMethod.NGN_TWO_LEG, None
+        if exc.status_code is None or exc.status_code >= 500:
+            raise CryptoServiceError(
+                'Could not reach our swap provider. Please try again.',
+                code='quidax_unreachable',
+                status=502,
+            )
+        raise CryptoServiceError(
+            f'{coin.upper()} to {to_coin.upper()} swaps are not available for this amount right now.',
+            code='unsupported_pair',
+        )
 
 
 @transaction.atomic
@@ -282,7 +451,7 @@ def create_quote(
     if amount is None or amount <= 0:
         raise CryptoServiceError('Amount must be greater than zero.', code='invalid_amount')
 
-    coin = _validate_coin(coin)
+    coin = _validate_coin(coin, 'swap' if quote_type == QuoteType.SWAP else 'buy_sell')
     rate = get_coin_rate_ngn(coin)
     ngn_value = (rate * amount).quantize(Decimal('0.01'))
 
@@ -294,11 +463,14 @@ def create_quote(
     to_rate = None
     to_coin_amount = None
     to_coin_clean = ''
+    swap_method = ''
+    gross_to_amount = None
+    fee_to_coin = None
 
     if quote_type == QuoteType.SWAP:
         if not to_coin:
             raise CryptoServiceError('to_coin is required for a swap quote.', code='to_coin_required')
-        to_coin_clean = _validate_coin(to_coin)
+        to_coin_clean = _validate_coin(to_coin, 'swap')
         if to_coin_clean == coin:
             raise CryptoServiceError('Cannot swap a coin into itself.', code='same_coin')
         to_rate = get_coin_rate_ngn(to_coin_clean)
@@ -307,8 +479,20 @@ def create_quote(
         net_ngn = ngn_value - fee_ngn
         if net_ngn <= 0:
             raise CryptoServiceError('Amount too small after fees.', code='amount_too_low')
-        to_coin_amount = (net_ngn / to_rate).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
         total_ngn = ngn_value  # notional; fee is deducted from the destination leg, not added on top
+
+        swap_method, gross_to_amount = _choose_swap_route(coin, to_coin_clean, amount)
+        if swap_method == SwapMethod.INSTANT:
+            # Quidax's quote is the gross; our fee comes out of it in the
+            # destination coin, since an instant swap has no NGN leg.
+            fee_to_coin = swap_fee_to_coin(fee_ngn, to_rate)
+            to_coin_amount = (gross_to_amount - fee_to_coin).quantize(
+                Decimal('0.00000001'), rounding=ROUND_DOWN
+            )
+            if to_coin_amount <= 0:
+                raise CryptoServiceError('Amount too small after fees.', code='amount_too_low')
+        else:
+            to_coin_amount = (net_ngn / to_rate).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
 
     elif quote_type == QuoteType.BUY:
         fee_ngn = compute_fee_ngn(FeeType.BUY, ngn_value)
@@ -329,6 +513,9 @@ def create_quote(
         fee_ngn=fee_ngn,
         total_ngn=total_ngn,
         to_coin_amount=to_coin_amount,
+        swap_method=swap_method,
+        gross_to_amount=gross_to_amount,
+        fee_to_coin=fee_to_coin,
     )
 
 

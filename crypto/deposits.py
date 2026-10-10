@@ -149,7 +149,7 @@ def _pick_address(payload: dict, network_key: str) -> tuple[str, str] | None:
 
 
 def get_deposit_address(user, coin: str, *, network: str | None = None) -> CryptoDepositAddress:
-    coin = _validate_coin(coin)
+    coin = _validate_coin(coin, 'deposit')
     network_key = (network or '').upper()
 
     cached = CryptoDepositAddress.objects.filter(user=user, coin=coin, network=network_key).first()
@@ -303,7 +303,7 @@ def reconcile_deposits(user, coin: str, *, apply: bool = False) -> list[dict]:
 
     Returns one summary dict per deposit Quidax reported. With apply=False
     nothing is written (dry run)."""
-    coin = _validate_coin(coin)
+    coin = _validate_coin(coin, None)
     sub_account = QuidaxSubAccount.objects.filter(user=user).first()
     if not sub_account:
         raise CryptoServiceError('User has no Quidax sub-account.', code='no_sub_account', status=404)

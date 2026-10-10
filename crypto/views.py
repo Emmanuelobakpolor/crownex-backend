@@ -381,6 +381,8 @@ class QuidaxWebhookView(APIView):
             deposits.handle_address_generated_webhook(request.data)
         elif event in ('order.done', 'order.completed'):
             deposits.handle_order_webhook(request.data)
+        elif event in ('swap_transaction.completed', 'swap_transaction.failed'):
+            orders.handle_swap_webhook(request.data)
         elif event in ('withdraw.successful', 'withdraw.rejected'):
             rejected = event == 'withdraw.rejected'
             # Deposit sweeps (sub-account -> master) arrive as withdraw.* too.

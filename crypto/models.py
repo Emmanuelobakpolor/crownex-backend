@@ -81,6 +81,13 @@ class QuoteType(models.TextChoices):
     SWAP = 'swap', 'Swap'
 
 
+class SwapMethod(models.TextChoices):
+    """How a swap is executed — fixed at quote time, never switched later."""
+
+    NGN_TWO_LEG = 'ngn_two_leg', 'Sell to NGN, then buy'
+    INSTANT = 'instant', 'Quidax Instant Swap'
+
+
 def _default_quote_expiry():
     return timezone.now() + timedelta(seconds=30)
 
@@ -106,6 +113,12 @@ class CryptoQuote(models.Model):
     to_coin_amount = models.DecimalField(
         max_digits=24, decimal_places=8, null=True, blank=True
     )
+    # Swap only. Instant swaps: gross_to_amount is what Quidax quoted before
+    # our fee; fee_to_coin is our fee in the destination coin, so
+    # to_coin_amount = gross_to_amount - fee_to_coin.
+    swap_method = models.CharField(max_length=16, choices=SwapMethod.choices, blank=True)
+    gross_to_amount = models.DecimalField(max_digits=24, decimal_places=8, null=True, blank=True)
+    fee_to_coin = models.DecimalField(max_digits=24, decimal_places=8, null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(default=_default_quote_expiry)
@@ -187,6 +200,14 @@ class CryptoOrder(models.Model):
 
     quidax_order_id = models.CharField(max_length=64, blank=True)
     quidax_sell_order_id = models.CharField(max_length=64, blank=True)  # swap leg 1
+    # Instant swaps (see SwapMethod): copied from the quote, plus the Quidax
+    # quotation confirmed and the swap transaction it produced — the keys
+    # webhooks and reconciliation use to find this order again.
+    swap_method = models.CharField(max_length=16, choices=SwapMethod.choices, blank=True)
+    gross_to_amount = models.DecimalField(max_digits=24, decimal_places=8, null=True, blank=True)
+    fee_to_coin = models.DecimalField(max_digits=24, decimal_places=8, null=True, blank=True)
+    quidax_swap_quotation_id = models.CharField(max_length=64, blank=True, db_index=True)
+    quidax_swap_id = models.CharField(max_length=64, blank=True, db_index=True)
     deposit_address = models.CharField(max_length=255, blank=True)  # sell, waiting_deposit
     payment_proof = models.ImageField(upload_to='crypto_proofs/', null=True, blank=True)
     flw_tx_ref = models.CharField(max_length=64, blank=True)

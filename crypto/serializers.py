@@ -12,7 +12,7 @@ from .models import (
     CryptoWallet,
     CryptoWithdrawal,
 )
-from .services import SUPPORTED_COINS
+from .services import coin_name
 
 
 class CryptoFeeSettingsSerializer(serializers.ModelSerializer):
@@ -47,7 +47,7 @@ class CryptoWalletSerializer(serializers.ModelSerializer):
         fields = ['coin', 'name', 'available', 'reserved', 'total', 'updated_at']
 
     def get_name(self, obj: CryptoWallet) -> str:
-        return SUPPORTED_COINS.get(obj.coin, {}).get('name', obj.coin.upper())
+        return coin_name(obj.coin)
 
     def get_total(self, obj: CryptoWallet) -> str:
         return str(obj.total)
@@ -76,6 +76,13 @@ class CryptoQuoteSerializer(serializers.ModelSerializer):
             'fee_ngn',
             'total_ngn',
             'to_coin_amount',
+            # Swap only: which route executes it, and for instant swaps the
+            # gross Quidax quote and our fee in the destination coin
+            # (to_coin_amount = gross_to_amount - fee_to_coin, an estimate
+            # until Quidax reports the executed amount).
+            'swap_method',
+            'gross_to_amount',
+            'fee_to_coin',
             'expires_at',
             'expires_in',
         ]
@@ -109,6 +116,8 @@ class CryptoOrderSerializer(serializers.ModelSerializer):
             'status',
             'payment_proof',
             'note',
+            'swap_method',
+            'fee_to_coin',
             'refunded_ngn',
             'created_at',
             'updated_at',

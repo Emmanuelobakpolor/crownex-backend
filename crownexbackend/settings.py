@@ -347,6 +347,22 @@ QUIDAX_WEBHOOK_SECRET = os.environ.get('QUIDAX_WEBHOOK_SECRET', '')
 # transfer destination. Left blank, it's looked up once per process.
 QUIDAX_MASTER_ACCOUNT_ID = os.environ.get('QUIDAX_MASTER_ACCOUNT_ID', '')
 
+# Quidax Instant Swap (crypto -> crypto in one quoted conversion). Off by
+# default: run `manage.py probe_quidax_swap` and one small real swap before
+# turning it on. While off, swaps use the two-leg NGN route and swap-only
+# coins (BNB, DOGE, ...) are hidden.
+QUIDAX_INSTANT_SWAP_ENABLED = os.environ.get('QUIDAX_INSTANT_SWAP_ENABLED', '').lower() in ('1', 'true', 'yes')
+# When Instant Swap can't quote a pair, fall back to selling into NGN and
+# buying the destination (both coins need NGN markets). The quote records
+# which route it used, so the user always confirms the route they're shown.
+CRYPTO_SWAP_NGN_FALLBACK = os.environ.get('CRYPTO_SWAP_NGN_FALLBACK', 'true').lower() in ('1', 'true', 'yes')
+# How far (percent) Quidax's execution-time quote may fall below the price
+# the user confirmed before the swap is refused with price_changed.
+CRYPTO_SWAP_MAX_SLIPPAGE_PERCENT = Decimal(os.environ.get('CRYPTO_SWAP_MAX_SLIPPAGE_PERCENT') or '1')
+# How long a swap request waits for Quidax to report the conversion done
+# before answering "processing" and leaving it to the webhook/reconciler.
+QUIDAX_INSTANT_SWAP_WAIT_SECONDS = int(os.environ.get('QUIDAX_INSTANT_SWAP_WAIT_SECONDS') or '6')
+
 # Dojah — identity verification (KYC) for virtual card eligibility.
 # Secret key is server-only; never sent to the Flutter app. Sandbox first
 # (sandbox.dojah.io, test NIN 70123456789), switch DOJAH_BASE_URL to

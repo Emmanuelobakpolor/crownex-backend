@@ -206,7 +206,7 @@ def estimate_withdrawal(*, coin: str, amount: Decimal) -> dict:
     effects. Lets a client show an accurate summary before the user
     confirms, since (unlike buy/sell/swap) withdrawals have no quote to
     lock the numbers in advance."""
-    coin = _validate_coin(coin)
+    coin = _validate_coin(coin, 'withdraw')
     if amount is None or amount <= 0:
         raise CryptoServiceError('Amount must be greater than zero.', code='invalid_amount')
 

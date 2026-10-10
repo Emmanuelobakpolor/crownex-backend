@@ -281,9 +281,11 @@ def get_withdrawal_by_reference(user_id: str, reference: str) -> dict:
 
 # ─── Instant swap (quoted price) ────────────────────────────────────────────
 #
-# Not used by trading yet — see probe_quidax_swap. Quote, then confirm
-# within ~15s; the result (and swap_transaction.completed webhook) carries
-# execution_price / received_amount to compare against the quote.
+# Used by swaps when QUIDAX_INSTANT_SWAP_ENABLED (orders._execute_instant_swap).
+# Quote (exactly one of from_amount / to_amount), then confirm within 15s;
+# the confirm response, GET swap_transactions/{id} and the
+# swap_transaction.completed|failed webhooks carry status, received_amount
+# and execution_price. Checked against docs.quidax.io/reference.
 
 
 def temporary_swap_quotation(
@@ -316,5 +318,13 @@ def confirm_swap_quotation(quotation_id: str, *, user_id: str = 'me') -> dict:
 
 
 def get_swap_transaction(swap_id: str, *, user_id: str = 'me') -> dict:
-    """GET /users/{user_id}/swap_transactions/{id}"""
+    """GET /users/{user_id}/swap_transactions/{id} — status initiated |
+    completed | failed, with received_amount / execution_price once done."""
     return _request('GET', f'/users/{user_id}/swap_transactions/{swap_id}')
+
+
+def list_swap_transactions(*, user_id: str = 'me') -> list:
+    """GET /users/{user_id}/swap_transactions — each row carries its
+    swap_quotation.id, which is how a swap whose confirm response was lost
+    is found again. Quidax documents no filters or pagination."""
+    return _extract_rows(_request('GET', f'/users/{user_id}/swap_transactions'))
