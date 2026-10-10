@@ -356,6 +356,8 @@ class AdminCryptoOrderActionView(APIView):
       retry           re-attempt a failed buy
       confirm_executed      order held for review: Quidax DID execute it -> finish it
       confirm_not_executed  order held for review: Quidax did NOT -> refund/release
+      swap_credit_coin      failed swap, sell leg done: credit the promised destination coin
+      swap_refund_ngn       failed swap, sell leg done: credit its net NGN value instead
     """
 
     permission_classes = [permissions.IsAdminUser]
@@ -370,6 +372,12 @@ class AdminCryptoOrderActionView(APIView):
         ),
         'confirm_not_executed': lambda order, note: crypto_orders.admin_resolve_unknown_order(
             order, note, executed=False
+        ),
+        'swap_credit_coin': lambda order, note: crypto_orders.admin_resolve_failed_swap(
+            order, note, credit='to_coin'
+        ),
+        'swap_refund_ngn': lambda order, note: crypto_orders.admin_resolve_failed_swap(
+            order, note, credit='ngn'
         ),
     }
 
