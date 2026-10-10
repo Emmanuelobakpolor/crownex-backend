@@ -8,7 +8,7 @@ status lifecycle.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -439,11 +439,32 @@ def retry_sell_after_deposit(user, reference: str) -> CryptoOrder:
 # ─── Swap ───────────────────────────────────────────────────────────────────
 
 
-def _swap_leg2_volume(order: CryptoOrder) -> str:
-    """Destination-coin quantity the quote promised (already net of our fee).
-    Quidax volume is in the base coin, so this is e.g. USDC for usdcngn —
-    never the naira amount."""
-    return _plain_decimal(order.to_coin_amount)
+def _is_precision_error(exc: QuidaxError) -> bool:
+    return not _outcome_unknown(exc) and 'precision' in (exc.message or '').lower()
+
+
+def _market_buy_fitting_precision(market: str, amount: Decimal) -> tuple[dict, Decimal]:
+    """Market buy of `amount` base coin. Each market caps how many decimals
+    its volume may have and Quidax doesn't tell us the cap up front, so on a
+    'precision exceeds maximum limit' refusal (a 4xx — nothing executed) the
+    amount is rounded DOWN one decimal at a time and retried. Returns the
+    payload and the volume that actually went through."""
+    decimals = max(-amount.normalize().as_tuple().exponent, 0)
+    volume = amount
+    while True:
+        try:
+            payload = quidax.create_instant_order(
+                market=market, side='buy', volume=_plain_decimal(volume),
+                user_id=settings.QUIDAX_USER_ID, retry=False,
+            )
+            return payload, volume
+        except QuidaxError as exc:
+            if not _is_precision_error(exc) or decimals == 0:
+                raise
+            decimals -= 1
+            volume = amount.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_DOWN)
+            if volume <= 0:
+                raise
 
 
 def _execute_quidax_swap(order: CryptoOrder) -> CryptoOrder:
@@ -499,11 +520,8 @@ def _execute_swap_buy_leg(order: CryptoOrder) -> CryptoOrder:
     on the source coin is gone on Quidax: it's debited on any outcome, never
     released."""
     to_market = f'{order.to_coin}ngn'
-    buy_volume = _swap_leg2_volume(order)
     try:
-        buy_payload = quidax.create_instant_order(
-            market=to_market, side='buy', volume=buy_volume, user_id=settings.QUIDAX_USER_ID, retry=False
-        )
+        buy_payload, bought = _market_buy_fitting_precision(to_market, order.to_coin_amount)
     except QuidaxError as exc:
         _log(order, 'quidax_error', f'Swap buy leg ({order.to_coin.upper()}) failed: {exc.message}')
         debit_reserved_crypto(order.user, order.coin, order.coin_amount)
@@ -514,43 +532,81 @@ def _execute_swap_buy_leg(order: CryptoOrder) -> CryptoOrder:
                 f'{order.coin_amount} {order.coin.upper()} already sold on the sell leg.',
             )
             return _flag_for_review(order, f'Swap buy leg outcome unknown: {exc.message}')
-        _log(
-            order,
-            'reservation_debited_needs_review',
-            f'{order.coin_amount} {order.coin.upper()} already sold on the sell leg — not '
-            f'released. Admin must review and manually credit {order.to_coin.upper()} or '
-            'compensate the user.',
-        )
-        return _fail_order(
-            order, f'Swap buy leg failed after sell leg succeeded: {exc.message}', refund_ngn=False
-        )
+        return _refund_failed_swap_as_ngn(order, exc.message)
 
     buy_data = buy_payload.get('data') or {}
     buy_order_id = str(buy_data.get('id') or '')
     _log(
         order,
         'quidax_buy_leg_sent',
-        f'market={to_market} volume={buy_volume} quidax_order_id={buy_order_id}',
+        f'market={to_market} volume={_plain_decimal(bought)} quidax_order_id={buy_order_id}',
     )
-    return _complete_swap(order, buy_order_id, debit_source=True)
+    return _complete_swap(order, buy_order_id, debit_source=True, bought=bought)
 
 
-def _complete_swap(order: CryptoOrder, buy_order_id: str, *, debit_source: bool) -> CryptoOrder:
+def _swap_net_ngn(order: CryptoOrder) -> Decimal:
+    """What the sold source coin is worth to the user after our fee — total_ngn
+    is the swap's notional; the fee comes out of the destination side."""
+    return (order.total_ngn - order.fee_ngn).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+
+def _refund_failed_swap_as_ngn(order: CryptoOrder, reason: str) -> CryptoOrder:
+    """Buy leg definitely didn't execute, but the sell leg did — the naira
+    from that sale is sitting in the master account. Pay it (net of fee) into
+    the user's NGN wallet so they're never left with nothing while waiting
+    for an admin. The source coin must already be debited."""
+    net_ngn = _swap_net_ngn(order)
+    note = (
+        f'Could not buy {order.to_coin.upper()} ({reason}). '
+        f'₦{net_ngn} was credited to your NGN wallet instead.'
+    )
+    with transaction.atomic():
+        locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
+        if locked.status in (OrderStatus.COMPLETED, OrderStatus.FAILED):
+            return locked
+        locked.status = OrderStatus.FAILED
+        locked.note = note
+        locked.save(update_fields=['status', 'note', 'updated_at'])
+        credit_wallet(locked.user, net_ngn)
+        _log(locked, 'swap_refunded_ngn', f'Buy leg failed: {reason}. Credited ₦{net_ngn} to NGN wallet.')
+
+    _log(order, 'order_failed', note)
+    order.refresh_from_db()
+    return order
+
+
+def _complete_swap(
+    order: CryptoOrder, buy_order_id: str, *, debit_source: bool, bought: Decimal | None = None
+) -> CryptoOrder:
     """debit_source=False when the source coin was already debited (a buy
-    leg that was parked for review, then confirmed executed)."""
+    leg that was parked for review, then confirmed executed). bought is the
+    destination amount Quidax actually filled when precision forced it below
+    the quote; the shortfall's NGN value goes to the user's wallet."""
+    dust_ngn = Decimal('0')
     with transaction.atomic():
         locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
         if locked.status == OrderStatus.COMPLETED:
             return locked
+        update_fields = ['quidax_order_id', 'status', 'updated_at']
+        if bought is not None and bought < locked.to_coin_amount:
+            dust_ngn = ((locked.to_coin_amount - bought) * locked.to_rate_ngn).quantize(
+                Decimal('0.01'), rounding=ROUND_DOWN
+            )
+            locked.to_coin_amount = bought
+            update_fields.append('to_coin_amount')
         locked.quidax_order_id = buy_order_id or locked.quidax_order_id
         locked.status = OrderStatus.COMPLETED
-        locked.save(update_fields=['quidax_order_id', 'status', 'updated_at'])
+        locked.save(update_fields=update_fields)
         if debit_source:
             debit_reserved_crypto(locked.user, locked.coin, locked.coin_amount)
         credit_crypto_available(locked.user, locked.to_coin, locked.to_coin_amount)
+        if dust_ngn > 0:
+            credit_wallet(locked.user, dust_ngn)
 
-    _log(order, 'order_completed', f'Credited {order.to_coin_amount} {order.to_coin.upper()} to wallet.')
     order.refresh_from_db()
+    _log(order, 'order_completed', f'Credited {order.to_coin_amount} {order.to_coin.upper()} to wallet.')
+    if dust_ngn > 0:
+        _log(order, 'precision_remainder_refunded', f'Credited ₦{dust_ngn} (amount below market precision) to NGN wallet.')
     return order
 
 
@@ -746,13 +802,7 @@ def admin_resolve_unknown_order(order: CryptoOrder, note: str = '', *, executed:
 
     if executed:
         return _complete_swap(order, '', debit_source=False)
-    _log(
-        order,
-        'reservation_debited_needs_review',
-        f'{order.coin_amount} {order.coin.upper()} was sold on the sell leg but the buy leg did not '
-        f'execute. Admin must credit {order.to_coin.upper()} or compensate the user.',
-    )
-    return _fail_order(order, 'Swap buy leg did not execute after sell leg succeeded.', refund_ngn=False)
+    return _refund_failed_swap_as_ngn(order, 'buy leg did not execute, confirmed by admin')
 
 
 def admin_resolve_failed_swap(order: CryptoOrder, note: str = '', *, credit: str) -> CryptoOrder:
@@ -769,12 +819,12 @@ def admin_resolve_failed_swap(order: CryptoOrder, note: str = '', *, credit: str
     with transaction.atomic():
         locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
         events = set(locked.logs.values_list('event', flat=True))
+        if events & {'admin_swap_compensated', 'swap_refunded_ngn'}:
+            raise CryptoServiceError('This swap has already been compensated.', code='already_resolved')
         if 'reservation_debited_needs_review' not in events:
             raise CryptoServiceError(
                 'This swap never sold its source coin — nothing to compensate.', code='invalid_state'
             )
-        if 'admin_swap_compensated' in events:
-            raise CryptoServiceError('This swap has already been compensated.', code='already_resolved')
 
         if credit == 'to_coin':
             credit_crypto_available(locked.user, locked.to_coin, locked.to_coin_amount)
@@ -783,7 +833,7 @@ def admin_resolve_failed_swap(order: CryptoOrder, note: str = '', *, credit: str
             locked.save(update_fields=['status', 'note', 'updated_at'])
             detail = f'Credited {locked.to_coin_amount} {locked.to_coin.upper()} to wallet.'
         else:
-            net_ngn = (locked.total_ngn - locked.fee_ngn).quantize(Decimal('0.01'))
+            net_ngn = _swap_net_ngn(locked)
             credit_wallet(locked.user, net_ngn)
             locked.note = f'Compensated with ₦{net_ngn} after the buy leg failed.'
             locked.save(update_fields=['note', 'updated_at'])

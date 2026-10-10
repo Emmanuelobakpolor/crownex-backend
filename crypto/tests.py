@@ -27,7 +27,7 @@ from .models import (
     QuoteType,
     SettlementStatus,
 )
-from .orders import admin_resolve_unknown_order, place_buy_order, place_sell_order, place_swap_order
+from .orders import admin_resolve_failed_swap, admin_resolve_unknown_order, place_buy_order, place_sell_order, place_swap_order
 from .quidax import QuidaxError
 from .services import CryptoServiceError, create_quote
 
@@ -692,6 +692,27 @@ class UnknownOutcomeTests(SettlementTestBase):
         self.assertEqual(order.status, OrderStatus.COMPLETED)
         self.assertEqual(self.crypto().total, Decimal('0'))
         self.assertEqual(self.crypto(coin='btc').available, order.to_coin_amount)
+
+    def test_swap_buy_leg_refused_refunds_net_ngn_automatically(self):
+        self.q.sell_errors = [None, QuidaxError('Insufficient account balance', status_code=422)]
+        order = self._swap()
+        self.assertEqual((order.status, order.needs_review), (OrderStatus.FAILED, False))
+        self.assertEqual(self.crypto().total, Decimal('0'), 'sell leg done: source debited')
+        self.assertEqual(self.ngn(), order.total_ngn - order.fee_ngn)
+        with self.assertRaises(CryptoServiceError):
+            admin_resolve_failed_swap(order, credit='to_coin')
+        self.assertEqual(self.ngn(), order.total_ngn - order.fee_ngn)
+
+    def test_swap_buy_leg_retries_with_fewer_decimals_on_precision_error(self):
+        CryptoFeeSettings.objects.create(fee_type='swap', flat_usd=0, percent=1)
+        precision = QuidaxError('Price or quantity precision exceeds maximum limit', status_code=422)
+        self.q.sell_errors = [None, precision, None]
+        order = self._swap()
+        self.assertEqual(order.status, OrderStatus.COMPLETED)
+        self.assertEqual([o['volume'] for o in self.q.orders[1:]], ['9.9', '9'])
+        self.assertEqual(order.to_coin_amount, Decimal('9'))
+        self.assertEqual(self.crypto(coin='btc').available, Decimal('9'))
+        self.assertEqual(self.ngn(), Decimal('1350.00'), '0.9 BTC remainder paid in NGN')
 
     def test_only_flagged_orders_can_be_resolved(self):
         order = self._sell()
