@@ -384,8 +384,6 @@ class AdminCryptoOrderActionView(APIView):
         'swap_refund_ngn': lambda order, note: crypto_orders.admin_resolve_failed_swap(
             order, note, credit='ngn'
         ),
-        # TEMPORARY — see admin_convert_unbacked_swap_credit
-        'swap_convert_ngn': crypto_orders.admin_convert_unbacked_swap_credit,
     }
 
     def post(self, request, reference):

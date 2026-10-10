@@ -128,7 +128,6 @@ class AdminCryptoOrderActionSerializer(serializers.Serializer):
             'confirm_not_executed',
             'swap_credit_coin',
             'swap_refund_ngn',
-            'swap_convert_ngn',  # TEMPORARY
         ]
     )
     note = serializers.CharField(required=False, allow_blank=True, default='')
