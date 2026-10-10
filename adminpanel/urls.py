@@ -21,6 +21,11 @@ urlpatterns = [
         name='admin-crypto-fee-update',
     ),
     path(
+        'crypto/master-balances/',
+        views.AdminMasterBalancesView.as_view(),
+        name='admin-crypto-master-balances',
+    ),
+    path(
         'crypto/orders/',
         views.AdminCryptoOrderListView.as_view(),
         name='admin-crypto-orders',

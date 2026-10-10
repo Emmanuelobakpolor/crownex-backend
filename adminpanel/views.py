@@ -4,10 +4,13 @@ Two entry points are open (create + login); everything else requires an
 authenticated staff account (IsAdminUser -> request.user.is_staff).
 """
 
+from decimal import Decimal, InvalidOperation
+
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.core.paginator import Paginator
-from django.db.models import Q
+from django.db.models import Q, Sum
+from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -16,12 +19,14 @@ from accounts.models import User
 from accounts.services import delete_user, issue_tokens
 from cards.models import VirtualCard
 from crypto import orders as crypto_orders
+from crypto import quidax as crypto_quidax
 from crypto import services as crypto_services
 from crypto import withdrawals as crypto_withdrawals
-from crypto.models import CryptoFeeSettings, CryptoOrder, CryptoWithdrawal
+from crypto.models import CryptoFeeSettings, CryptoOrder, CryptoWallet, CryptoWithdrawal
 from crypto.serializers import CryptoFeeSettingsSerializer, CryptoFeeSettingsUpdateSerializer
 from kyc import services as kyc_services
 from kyc.models import KycVerification
+from wallet.models import Wallet
 
 from . import services
 from .serializers import (
@@ -572,3 +577,71 @@ class AdminCardListView(APIView):
                 'results': AdminVirtualCardSerializer(page_obj.object_list, many=True).data,
             }
         )
+
+
+class AdminMasterBalancesView(APIView):
+    """GET /api/admin/crypto/master-balances/
+
+    What the Quidax master account actually holds, per coin, next to what
+    our internal ledger says users own (CryptoWallet available + reserved).
+    A negative difference means user balances aren't fully backed — swaps
+    and withdrawals of that coin will fail with 'insufficient balance'.
+    """
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        try:
+            wallets = crypto_quidax.list_wallets(settings.QUIDAX_USER_ID)
+        except crypto_quidax.QuidaxError as exc:
+            return Response(
+                {'detail': f'Could not reach Quidax: {exc.message}'}, status=status.HTTP_502_BAD_GATEWAY
+            )
+        on_quidax = {
+            str(w.get('currency') or '').lower(): w for w in wallets if isinstance(w, dict)
+        }
+
+        owed = {
+            row['coin']: row
+            for row in CryptoWallet.objects.values('coin').annotate(
+                available=Sum('available'), reserved=Sum('reserved')
+            )
+        }
+
+        def dec(value) -> Decimal:
+            try:
+                return Decimal(str(value or '0'))
+            except (InvalidOperation, ValueError):
+                return Decimal('0')
+
+        rows = []
+        coins = ['ngn', *crypto_services.SUPPORTED_COINS]
+        coins += sorted(c for c in on_quidax if c not in coins and dec(on_quidax[c].get('balance')) > 0)
+        for coin in coins:
+            q = on_quidax.get(coin, {})
+            balance, locked = dec(q.get('balance')), dec(q.get('locked'))
+            if coin == 'ngn':
+                users_available = Wallet.objects.aggregate(t=Sum('ngn_balance'))['t'] or Decimal('0')
+                users_reserved = Decimal('0')
+            else:
+                o = owed.get(coin, {})
+                users_available = o.get('available') or Decimal('0')
+                users_reserved = o.get('reserved') or Decimal('0')
+            users_total = users_available + users_reserved
+            rows.append(
+                {
+                    'coin': coin,
+                    'name': crypto_services.SUPPORTED_COINS.get(coin, {}).get('name')
+                    or ('Naira' if coin == 'ngn' else coin.upper()),
+                    'supported': coin in crypto_services.SUPPORTED_COINS,
+                    'on_quidax': coin in on_quidax,
+                    'master_balance': str(balance),
+                    'master_locked': str(locked),
+                    'users_available': str(users_available),
+                    'users_reserved': str(users_reserved),
+                    'users_total': str(users_total),
+                    'difference': str(balance - users_total),
+                }
+            )
+
+        return Response({'fetched_at': timezone.now().isoformat(), 'rows': rows})

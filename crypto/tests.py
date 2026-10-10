@@ -731,3 +731,32 @@ class QuidaxClientRetryTests(TestCase):
                 quidax.create_instant_order(market='usdtngn', side='sell', volume='1', retry=False)
         self.assertEqual(request.call_count, 1)
         self.assertEqual(ctx.exception.status_code, 502)
+
+
+class MasterBalancesEndpointTests(SettlementTestBase):
+    def test_compares_master_balances_with_user_ledger(self):
+        CryptoWallet.objects.create(user=self.user, coin='usdc', available=Decimal('2.76'))
+        CryptoWallet.objects.create(user=self.user, coin='sol', available=Decimal('1'), reserved=Decimal('0.5'))
+        admin = User.objects.create_user(email='admin@example.com', password='x', full_name='Admin')
+        admin.is_staff = True
+        admin.save()
+        wallets = [
+            {'currency': 'usdc', 'balance': '0.5', 'locked': '0'},
+            {'currency': 'sol', 'balance': '2', 'locked': '0.1'},
+        ]
+        client = APIClient()
+        client.force_authenticate(admin)
+        with mock.patch('crypto.quidax.list_wallets', return_value=wallets):
+            response = client.get('/api/admin/crypto/master-balances/')
+        self.assertEqual(response.status_code, 200)
+        rows = {r['coin']: r for r in response.json()['rows']}
+        self.assertEqual(Decimal(rows['usdc']['difference']), Decimal('-2.26'))
+        self.assertEqual(Decimal(rows['sol']['users_total']), Decimal('1.5'))
+        self.assertEqual(Decimal(rows['sol']['difference']), Decimal('0.5'))
+        self.assertFalse(rows['btc']['on_quidax'])
+        self.assertEqual(rows['ngn']['coin'], 'ngn')
+
+    def test_requires_staff(self):
+        client = APIClient()
+        client.force_authenticate(self.user)
+        self.assertEqual(client.get('/api/admin/crypto/master-balances/').status_code, 403)

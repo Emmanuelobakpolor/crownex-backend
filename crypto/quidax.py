@@ -249,6 +249,11 @@ def get_wallet(user_id: str, currency: str) -> dict:
     return _request('GET', f'/users/{user_id}/wallets/{currency}')
 
 
+def list_wallets(user_id: str) -> list:
+    """GET /users/{user_id}/wallets — every currency's balance in one call."""
+    return _extract_rows(_request('GET', f'/users/{user_id}/wallets'))
+
+
 def create_internal_transfer(
     *, from_user_id: str, to_user_id: str, currency: str, amount: str, reference: str
 ) -> dict:
