@@ -14,6 +14,7 @@ from decimal import ROUND_DOWN, Decimal
 
 from django.conf import settings
 from django.db import DatabaseError, IntegrityError, transaction
+from django.db.models import Q
 
 from wallet import flutterwave
 from wallet.flutterwave import FlutterwaveError
@@ -163,7 +164,12 @@ def _execute_quidax_buy(order: CryptoOrder, *, refund_on_fail: bool) -> CryptoOr
     to buy that many coins and fail with 'Insufficient account balance'. Only
     the crypto itself is bought; our fee stays with us as platform margin.
     Markets cap volume decimals (e.g. 8-decimal coin_amount on a 6-decimal
-    market), so the volume is trimmed to fit and the remainder refunded."""
+    market), so the volume is trimmed to fit and the remainder refunded.
+
+    With QUIDAX_INSTANT_BUY_ENABLED the buy goes through Instant Swap
+    (NGN -> coin) instead — see _execute_instant_buy."""
+    if settings.QUIDAX_INSTANT_BUY_ENABLED:
+        return _execute_instant_buy(order)
     market = f'{order.coin}ngn'
 
     try:
@@ -684,6 +690,18 @@ def place_swap_order(
 _SWAP_COMPLETED = 'completed'
 _SWAP_FAILED = 'failed'
 
+# Orders whose Quidax side is a swap_quotation: instant swaps, and buys
+# placed through Instant Swap (they carry a quotation id once quoted).
+_INSTANT_ORDERS = Q(order_type=OrderType.SWAP, swap_method=SwapMethod.INSTANT) | (
+    Q(order_type=OrderType.BUY) & ~Q(quidax_swap_quotation_id='')
+)
+
+
+def _is_instant(order: CryptoOrder) -> bool:
+    if order.order_type == OrderType.BUY:
+        return bool(order.quidax_swap_quotation_id)
+    return order.swap_method == SwapMethod.INSTANT
+
 
 def _quidax_data(payload) -> dict:
     data = payload.get('data') if isinstance(payload, dict) else None
@@ -767,9 +785,14 @@ def _apply_swap_result(order: CryptoOrder, swap: dict) -> CryptoOrder:
     reconciliation) to the matching outcome. Non-terminal statuses leave the
     order processing."""
     status = str(swap.get('status') or '').lower()
+    is_buy = order.order_type == OrderType.BUY
     if status == _SWAP_COMPLETED:
-        return _finalize_instant_swap(order, swap)
+        return _finalize_instant_buy(order, swap) if is_buy else _finalize_instant_swap(order, swap)
     if status == _SWAP_FAILED:
+        if is_buy:
+            return _fail_instant_buy(
+                order, "We couldn't complete your purchase.", f'Quidax swap {swap.get("id")} failed.'
+            )
         return _release_instant_swap(
             order,
             _not_used_note(order, "We couldn't complete your swap."),
@@ -896,7 +919,7 @@ def _execute_instant_swap(order: CryptoOrder) -> CryptoOrder:
 def _find_instant_swap_order(swap: dict) -> CryptoOrder | None:
     swap_id = str(swap.get('id') or '')
     quotation_id = str((swap.get('swap_quotation') or {}).get('id') or '')
-    qs = CryptoOrder.objects.filter(order_type=OrderType.SWAP, swap_method=SwapMethod.INSTANT)
+    qs = CryptoOrder.objects.filter(_INSTANT_ORDERS)
     if swap_id:
         order = qs.filter(quidax_swap_id=swap_id).first()
         if order:
@@ -930,7 +953,7 @@ def reconcile_instant_swap(order: CryptoOrder) -> CryptoOrder:
     """Asks Quidax what became of a processing instant swap and applies it.
     Never releases or credits on a guess: if Quidax has no record we can tie
     to this order, it stays as it is for an admin."""
-    if order.status != OrderStatus.PROCESSING or order.swap_method != SwapMethod.INSTANT:
+    if order.status != OrderStatus.PROCESSING or not _is_instant(order):
         return order
 
     if order.quidax_swap_id:
@@ -973,6 +996,177 @@ def reconcile_instant_swap(order: CryptoOrder) -> CryptoOrder:
     return _apply_swap_result(order, swap)
 
 
+# ─── Instant buy (Quidax swap_quotation NGN -> coin) ───────────────────────
+#
+# NGN markets only take whole-naira totals (quote_precision 0), so a market
+# buy of e.g. 0.03 LTC (₦2,718.57) is refused for "precision" whatever the
+# coin volume. Instant Swap is priced by the NGN spent instead: we spend the
+# whole naira of the quote's coin value, credit what Quidax actually
+# delivers, and refund the leftover kobo. Same lifecycle and recovery paths
+# as the instant swap above (webhook, reconcile_instant_swap, admin review).
+# On a definite failure the NGN is refunded only if it came from our wallet,
+# exactly like a failed market buy.
+
+QUIDAX_MIN_NGN_ORDER = Decimal('1000')
+
+
+def _instant_buy_spend_ngn(order: CryptoOrder) -> Decimal:
+    return (order.total_ngn - order.fee_ngn).quantize(Decimal('1'), rounding=ROUND_DOWN)
+
+
+def _fail_instant_buy(order: CryptoOrder, note: str, detail: str = '') -> CryptoOrder:
+    """Quidax definitely did not buy: fail the order and refund wallet-funded
+    NGN — once, however many times this is reached."""
+    if detail:
+        _log(order, 'instant_buy_failed', detail)
+    order = _fail_order(order, note, refund_ngn=_wallet_payment_outstanding(order))
+    CryptoOrder.objects.filter(pk=order.pk, needs_review=True).update(needs_review=False)
+    order.refresh_from_db()
+    return order
+
+
+def _finalize_instant_buy(order: CryptoOrder, swap: dict) -> CryptoOrder:
+    """Quidax reports the NGN -> coin conversion completed: credit what it
+    actually delivered (our fee was already taken in NGN) plus the unspent
+    kobo — exactly once. A report we can't trust is parked for an admin."""
+    received = quidax_decimal(swap.get('received_amount'))
+    to_currency = str(swap.get('to_currency') or order.coin).lower()
+    from_currency = str(swap.get('from_currency') or 'ngn').lower()
+    from_amount = quidax_decimal(swap.get('from_amount'))
+    spend_ngn = _instant_buy_spend_ngn(order)
+    if (
+        received is None
+        or received <= 0
+        or to_currency != order.coin
+        or from_currency != 'ngn'
+        or (from_amount is not None and from_amount != spend_ngn)
+    ):
+        return _flag_for_review(
+            order, f'Quidax reported buy swap {swap.get("id")} completed with unusable data: {swap!r:.300}'
+        )
+
+    with transaction.atomic():
+        locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
+        if locked.status in (OrderStatus.COMPLETED, OrderStatus.FAILED):
+            return locked
+        credit = received.quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
+        kobo_ngn = locked.total_ngn - locked.fee_ngn - spend_ngn
+        credit_crypto_available(locked.user, locked.coin, credit)
+        if kobo_ngn > 0:
+            credit_wallet(locked.user, kobo_ngn)
+        locked.coin_amount = credit
+        locked.quidax_swap_id = str(swap.get('id') or locked.quidax_swap_id)
+        locked.quidax_order_id = locked.quidax_swap_id
+        locked.status = OrderStatus.COMPLETED
+        locked.needs_review = False
+        locked.note = ''
+        locked.save(
+            update_fields=[
+                'coin_amount', 'quidax_swap_id', 'quidax_order_id', 'status', 'needs_review', 'note', 'updated_at',
+            ]
+        )
+        _log(
+            locked,
+            'order_completed',
+            f'Quidax delivered {received} {locked.coin.upper()} for ₦{spend_ngn} (execution_price='
+            f'{swap.get("execution_price")}); credited {credit} {locked.coin.upper()}.',
+        )
+        if kobo_ngn > 0:
+            _log(locked, 'precision_remainder_refunded', f'Credited ₦{kobo_ngn} (kobo below whole naira) to NGN wallet.')
+    order.refresh_from_db()
+    return order
+
+
+def _execute_instant_buy(order: CryptoOrder) -> CryptoOrder:
+    """Runs once payment is secured (payment_received); see the section
+    comment above."""
+    spend_ngn = _instant_buy_spend_ngn(order)
+    if spend_ngn < QUIDAX_MIN_NGN_ORDER:
+        return _fail_instant_buy(
+            order, f'Minimum crypto purchase is ₦{QUIDAX_MIN_NGN_ORDER:,}.', f'Spend ₦{spend_ngn} is below the minimum.'
+        )
+
+    try:
+        quotation = _quidax_data(
+            quidax.create_swap_quotation(
+                from_currency='ngn',
+                to_currency=order.coin,
+                from_amount=plain_decimal(spend_ngn),
+                user_id=settings.QUIDAX_USER_ID,
+            )
+        )
+    except QuidaxError as exc:
+        # A quotation moves nothing — whatever went wrong, it's safe to fail.
+        _log(order, 'quidax_error', f'Buy quotation failed: {exc.status_code} {exc.message}')
+        return _fail_instant_buy(order, "We couldn't get a price right now. Please try again.")
+
+    quotation_id = str(quotation.get('id') or '')
+    gross = quidax_decimal(quotation.get('to_amount'))
+    if (
+        not quotation_id
+        or gross is None
+        or gross <= 0
+        or str(quotation.get('from_currency', 'ngn')).lower() != 'ngn'
+        or str(quotation.get('to_currency', order.coin)).lower() != order.coin
+    ):
+        _log(order, 'quidax_error', f'Unusable buy quotation: {quotation!r:.300}')
+        return _fail_instant_buy(order, "We couldn't get a price right now. Please try again.")
+
+    slippage = Decimal(str(settings.CRYPTO_SWAP_MAX_SLIPPAGE_PERCENT)) / Decimal('100')
+    floor = order.coin_amount * (Decimal('1') - slippage)
+    if gross < floor:
+        _log(
+            order,
+            'price_changed',
+            f'Quidax now quotes {gross} {order.coin.upper()} for ₦{spend_ngn}, below the confirmed '
+            f'{order.coin_amount} less {settings.CRYPTO_SWAP_MAX_SLIPPAGE_PERCENT}% ({floor}).',
+        )
+        return _fail_instant_buy(order, 'The price moved before your purchase went through. Please get a new quote.')
+
+    # Persist the quotation id BEFORE confirming: if anything dies after the
+    # confirm call, reconciliation can still find the swap by this id.
+    with transaction.atomic():
+        locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
+        locked.quidax_swap_quotation_id = quotation_id
+        locked.quidax_swap_id = ''  # a previous (admin-retried) attempt's swap
+        locked.status = OrderStatus.PROCESSING
+        locked.save(update_fields=['quidax_swap_quotation_id', 'quidax_swap_id', 'status', 'updated_at'])
+    order.refresh_from_db()
+    _log(
+        order,
+        'quidax_buy_quoted',
+        f'quotation={quotation_id} ₦{spend_ngn} -> {gross} {order.coin.upper()} '
+        f'quoted_price={quotation.get("quoted_price")} expires_at={quotation.get("expires_at")}',
+    )
+
+    try:
+        swap = _quidax_data(quidax.confirm_swap_quotation(quotation_id, user_id=settings.QUIDAX_USER_ID))
+    except QuidaxError as exc:
+        _log(order, 'quidax_error', f'Buy confirm failed: {exc.status_code} {exc.message}')
+        if _outcome_unknown(exc):
+            return _flag_for_review(order, f'Instant buy confirm outcome unknown: {exc.message}')
+        # 4xx (quotation used/expired, insufficient balance, ...): nothing converted.
+        return _fail_instant_buy(order, "We couldn't complete your purchase right now. Please try again later.")
+
+    swap_id = str(swap.get('id') or '')
+    if not swap_id:
+        return _flag_for_review(order, f'Quidax accepted the buy confirm but returned no swap id: {swap!r:.300}')
+    with transaction.atomic():
+        locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
+        locked.quidax_swap_id = swap_id
+        locked.save(update_fields=['quidax_swap_id', 'updated_at'])
+    order.refresh_from_db()
+    _log(order, 'quidax_swap_confirmed', f'swap={swap_id} status={swap.get("status")}')
+
+    swap = _await_swap(swap)
+    try:
+        return _apply_swap_result(order, swap)
+    except DatabaseError:
+        logger.exception('Finalizing instant buy %s failed; left for reconciliation.', order.reference)
+        order.refresh_from_db()
+        return order
+
+
 def reconcile_due_instant_swaps(min_age_seconds: int = 60) -> list[tuple[CryptoOrder, str]]:
     """Every processing instant swap older than min_age_seconds, reconciled
     against Quidax. Returns (order, status before) pairs. Run by the
@@ -983,8 +1177,7 @@ def reconcile_due_instant_swaps(min_age_seconds: int = 60) -> list[tuple[CryptoO
 
     cutoff = timezone.now() - timedelta(seconds=min_age_seconds)
     pending = CryptoOrder.objects.filter(
-        order_type=OrderType.SWAP,
-        swap_method=SwapMethod.INSTANT,
+        _INSTANT_ORDERS,
         status=OrderStatus.PROCESSING,
         created_at__lte=cutoff,
     ).order_by('created_at')
@@ -1001,7 +1194,7 @@ def reconcile_due_instant_swaps(min_age_seconds: int = 60) -> list[tuple[CryptoO
 def admin_check_instant_swap(order: CryptoOrder, note: str = '') -> CryptoOrder:
     """Admin "Check Quidax" for a processing instant swap — same as the
     reconciler, on demand."""
-    if order.swap_method != SwapMethod.INSTANT or order.status != OrderStatus.PROCESSING:
+    if not _is_instant(order) or order.status != OrderStatus.PROCESSING:
         raise CryptoServiceError('Only processing instant swaps can be checked.', code='invalid_state')
     if note:
         _log(order, 'admin_check', note)
@@ -1138,6 +1331,25 @@ def admin_resolve_unknown_order(order: CryptoOrder, note: str = '', *, executed:
     order.refresh_from_db()
     outcome = 'executed' if executed else 'did not execute'
     _log(order, 'admin_resolved', f'Admin confirmed the Quidax order {outcome}. {note}'.strip())
+
+    if order.order_type == OrderType.BUY and _is_instant(order):
+        # Quidax's own record beats the admin's reading of it.
+        order = reconcile_instant_swap(order)
+        if order.status != OrderStatus.PROCESSING:
+            return order
+        if executed:
+            # No Quidax figure to go on: credit what the quote promised.
+            return _finalize_instant_buy(
+                order,
+                {
+                    'id': order.quidax_swap_id or 'admin-confirmed',
+                    'status': _SWAP_COMPLETED,
+                    'received_amount': str(order.coin_amount),
+                },
+            )
+        return _fail_instant_buy(
+            order, 'Quidax buy did not execute (confirmed by admin).', 'Admin confirmed it did not execute.'
+        )
 
     if order.order_type == OrderType.BUY:
         if executed:

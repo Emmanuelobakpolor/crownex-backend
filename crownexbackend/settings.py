@@ -352,6 +352,12 @@ QUIDAX_MASTER_ACCOUNT_ID = os.environ.get('QUIDAX_MASTER_ACCOUNT_ID', '')
 # turning it on. While off, swaps use the two-leg NGN route and swap-only
 # coins (BNB, DOGE, ...) are hidden.
 QUIDAX_INSTANT_SWAP_ENABLED = os.environ.get('QUIDAX_INSTANT_SWAP_ENABLED', '').lower() in ('1', 'true', 'yes')
+# Buys through Instant Swap (NGN -> coin, priced by whole naira spent)
+# instead of a market order — NGN markets refuse market orders whose naira
+# total has kobo ("price or quantity precision exceeds maximum limit").
+# Off by default: check `manage.py probe_quidax_swap` shows ngn-><coin> OK
+# for every coin you sell, and do one small real buy, before turning it on.
+QUIDAX_INSTANT_BUY_ENABLED = os.environ.get('QUIDAX_INSTANT_BUY_ENABLED', '').lower() in ('1', 'true', 'yes')
 # When Instant Swap can't quote a pair, fall back to selling into NGN and
 # buying the destination (both coins need NGN markets). The quote records
 # which route it used, so the user always confirms the route they're shown.

@@ -2,7 +2,7 @@
 flow it shares primitives with. Every Quidax call is faked — requests
 itself is patched to fail the test if anything tries the network."""
 
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from io import StringIO
 from unittest import mock
 
@@ -27,7 +27,15 @@ from .models import (
     QuoteType,
     SettlementStatus,
 )
-from .orders import admin_resolve_failed_swap, admin_resolve_unknown_order, place_buy_order, place_sell_order, place_swap_order
+from .orders import (
+    admin_approve_buy,
+    admin_resolve_failed_swap,
+    admin_resolve_unknown_order,
+    handle_swap_webhook,
+    place_buy_order,
+    place_sell_order,
+    place_swap_order,
+)
 from .quidax import QuidaxError
 from .services import CryptoServiceError, create_quote
 
@@ -47,6 +55,12 @@ class FakeQuidax:
         self.transfer_errors: list[Exception] = []
         self.transfer_statuses: list[str] = []
         self.sell_errors: list[Exception] = []
+        self.swap_quotes: list[dict] = []
+        self.swap_quote_errors: list[Exception] = []
+        self.confirm_errors: list[Exception] = []
+        self.swap_price = RATE  # NGN per coin Instant Swap quotes at
+        self.swap_status = 'completed'  # status the confirm response reports
+        self.swaps: dict[str, dict] = {}
 
     def get_wallet(self, user_id, currency):
         return {'data': {'currency': currency, 'balance': str(self.balances.get((user_id, currency), 0))}}
@@ -86,6 +100,44 @@ class FakeQuidax:
             raise error
         return {'data': {'id': f'ord-{len(self.orders)}'}}
 
+    def create_swap_quotation(self, *, from_currency, to_currency, from_amount, user_id='me'):
+        if self.swap_quote_errors:
+            raise self.swap_quote_errors.pop(0)
+        to_amount = (Decimal(from_amount) / self.swap_price).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
+        quote = {
+            'id': f'q-{len(self.swap_quotes) + 1}',
+            'from_currency': from_currency,
+            'to_currency': to_currency,
+            'from_amount': from_amount,
+            'to_amount': str(to_amount),
+            'quoted_price': str(self.swap_price),
+        }
+        self.swap_quotes.append(quote)
+        return {'data': quote}
+
+    def confirm_swap_quotation(self, quotation_id, *, user_id='me'):
+        if self.confirm_errors:
+            raise self.confirm_errors.pop(0)
+        quote = next(q for q in self.swap_quotes if q['id'] == quotation_id)
+        swap = {
+            'id': f'swap-{len(self.swaps) + 1}',
+            'status': self.swap_status,
+            'from_currency': quote['from_currency'],
+            'to_currency': quote['to_currency'],
+            'from_amount': quote['from_amount'],
+            'received_amount': quote['to_amount'],
+            'execution_price': quote['quoted_price'],
+            'swap_quotation': {'id': quotation_id},
+        }
+        self.swaps[swap['id']] = swap
+        return {'data': swap}
+
+    def get_swap_transaction(self, swap_id, *, user_id='me'):
+        return {'data': self.swaps[swap_id]}
+
+    def list_swap_transactions(self, *, user_id='me'):
+        return list(self.swaps.values())
+
     def sweeps_to_master(self):
         return [t for t in self.transfers if t['to_user_id'] == MASTER_ID]
 
@@ -102,6 +154,10 @@ class SettlementTestBase(TestCase):
                 create_internal_transfer=self.q.create_internal_transfer,
                 get_withdrawal_by_reference=self.q.get_withdrawal_by_reference,
                 create_instant_order=self.q.create_instant_order,
+                create_swap_quotation=self.q.create_swap_quotation,
+                confirm_swap_quotation=self.q.confirm_swap_quotation,
+                get_swap_transaction=self.q.get_swap_transaction,
+                list_swap_transactions=self.q.list_swap_transactions,
             ),
             mock.patch('crypto.services.get_coin_rate_ngn', return_value=RATE),
         ]
@@ -775,6 +831,91 @@ class UnknownOutcomeTests(SettlementTestBase):
         self.assertEqual(order.status, OrderStatus.COMPLETED)
         with self.assertRaises(CryptoServiceError):
             admin_resolve_unknown_order(order, executed=False)
+
+
+@override_settings(QUIDAX_INSTANT_BUY_ENABLED=True, QUIDAX_INSTANT_SWAP_WAIT_SECONDS=0, FLW_SECRET_KEY='')
+class InstantBuyTests(SettlementTestBase):
+    """QUIDAX_INSTANT_BUY_ENABLED: buys go through Instant Swap NGN -> coin,
+    spending whole naira, never a market order."""
+
+    def setUp(self):
+        super().setUp()
+        self.user.set_transaction_pin('1234')
+        self.user.save()
+
+    def _buy(self, amount='1.003', balance='20000'):
+        # 1.003 USDT at ₦1,500 = ₦1,504.50 -> spends ₦1,504, ₦0.50 kobo back.
+        Wallet.objects.update_or_create(user=self.user, defaults={'ngn_balance': Decimal(balance)})
+        quote = create_quote(self.user, quote_type=QuoteType.BUY, coin='usdt', amount=Decimal(amount))
+        return place_buy_order(self.user, quote_id=quote.id, pin='1234')
+
+    def test_completed_credits_delivered_coin_and_refunds_kobo(self):
+        order = self._buy()
+        self.assertEqual(order.status, OrderStatus.COMPLETED)
+        self.assertEqual(self.q.orders, [], 'no market order')
+        self.assertEqual(self.q.swap_quotes[0]['from_currency'], 'ngn')
+        self.assertEqual(self.q.swap_quotes[0]['from_amount'], '1504')
+        delivered = Decimal('1.00266666')
+        self.assertEqual(order.coin_amount, delivered)
+        self.assertEqual(self.crypto().available, delivered)
+        self.assertEqual(self.ngn(), Decimal('20000') - order.total_ngn + Decimal('0.50'))
+
+    def test_quotation_refused_fails_and_refunds(self):
+        self.q.swap_quote_errors = [QuidaxError('Pair not supported', status_code=422)]
+        order = self._buy()
+        self.assertEqual((order.status, order.needs_review), (OrderStatus.FAILED, False))
+        self.assertEqual(self.ngn(), Decimal('20000'))
+        self.assertEqual(self.q.swaps, {})
+
+    def test_price_moved_fails_and_refunds_without_confirming(self):
+        self.q.swap_price = Decimal('1600')
+        order = self._buy()
+        self.assertEqual(order.status, OrderStatus.FAILED)
+        self.assertEqual(self.ngn(), Decimal('20000'))
+        self.assertEqual(self.q.swaps, {})
+
+    def test_confirm_timeout_holds_ngn_until_admin_resolves(self):
+        self.q.confirm_errors = [QuidaxError('Could not reach Quidax: timeout')]
+        order = self._buy()
+        self.assertEqual((order.status, order.needs_review), (OrderStatus.PROCESSING, True))
+        self.assertEqual(self.ngn(), Decimal('20000') - order.total_ngn)
+
+        order = admin_resolve_unknown_order(order, executed=False)
+        self.assertEqual(order.status, OrderStatus.FAILED)
+        self.assertEqual(self.ngn(), Decimal('20000'))
+
+    def test_pending_swap_completed_by_webhook_exactly_once(self):
+        self.q.swap_status = 'initiated'
+        order = self._buy()
+        self.assertEqual(order.status, OrderStatus.PROCESSING)
+        self.assertFalse(CryptoWallet.objects.filter(user=self.user, coin='usdt', available__gt=0).exists())
+
+        swap = {**self.q.swaps['swap-1'], 'status': 'completed'}
+        handle_swap_webhook({'event': 'swap_transaction.completed', 'data': swap})
+        handle_swap_webhook({'event': 'swap_transaction.completed', 'data': swap})
+        order.refresh_from_db()
+        self.assertEqual(order.status, OrderStatus.COMPLETED)
+        self.assertEqual(self.crypto().available, Decimal('1.00266666'))
+        self.assertEqual(self.ngn(), Decimal('20000') - order.total_ngn + Decimal('0.50'))
+
+    def test_failed_webhook_refunds_once(self):
+        self.q.swap_status = 'initiated'
+        order = self._buy()
+        swap = {**self.q.swaps['swap-1'], 'status': 'failed'}
+        handle_swap_webhook({'event': 'swap_transaction.failed', 'data': swap})
+        handle_swap_webhook({'event': 'swap_transaction.failed', 'data': swap})
+        order.refresh_from_db()
+        self.assertEqual(order.status, OrderStatus.FAILED)
+        self.assertEqual(self.ngn(), Decimal('20000'))
+        self.assertFalse(CryptoWallet.objects.filter(user=self.user, coin='usdt', available__gt=0).exists())
+
+    def test_bank_funded_failure_is_not_refunded_to_wallet(self):
+        order = self._buy(balance='0')
+        self.assertEqual(order.status, OrderStatus.PENDING_PAYMENT)
+        self.q.swap_quote_errors = [QuidaxError('Pair not supported', status_code=422)]
+        order = admin_approve_buy(order)
+        self.assertEqual(order.status, OrderStatus.FAILED)
+        self.assertEqual(self.ngn(), Decimal('0'))
 
 
 class QuidaxClientRetryTests(TestCase):
