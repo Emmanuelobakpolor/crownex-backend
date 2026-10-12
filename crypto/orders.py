@@ -153,25 +153,21 @@ def _flag_for_review(order: CryptoOrder, note: str) -> CryptoOrder:
 _plain_decimal = plain_decimal
 
 
-def _buy_market_volume(order: CryptoOrder) -> str:
-    """Quidax market-order volume is always in the BASE coin (btc in btcngn),
-    on buys as well as sells — passing the naira amount here makes Quidax try
-    to buy that many coins and fail with 'Insufficient account balance'. Only
-    the crypto itself is bought; our fee stays with us as platform margin."""
-    return _plain_decimal(order.coin_amount)
-
-
 def _execute_quidax_buy(order: CryptoOrder, *, refund_on_fail: bool) -> CryptoOrder:
     """Places the market buy on Quidax and finalizes the order — credits the
     user's internal CryptoWallet on success. Assumes payment is already
-    secured (status is payment_received going in)."""
+    secured (status is payment_received going in).
+
+    Quidax market-order volume is always in the BASE coin (btc in btcngn),
+    on buys as well as sells — passing the naira amount here makes Quidax try
+    to buy that many coins and fail with 'Insufficient account balance'. Only
+    the crypto itself is bought; our fee stays with us as platform margin.
+    Markets cap volume decimals (e.g. 8-decimal coin_amount on a 6-decimal
+    market), so the volume is trimmed to fit and the remainder refunded."""
     market = f'{order.coin}ngn'
-    volume = _buy_market_volume(order)
 
     try:
-        payload = quidax.create_instant_order(
-            market=market, side='buy', volume=volume, user_id=settings.QUIDAX_USER_ID, retry=False
-        )
+        payload, bought = _market_buy_fitting_precision(market, order.coin_amount)
     except QuidaxError as exc:
         _log(order, 'quidax_error', f'Buy order request failed: {exc.message}')
         if _outcome_unknown(exc):
@@ -183,23 +179,39 @@ def _execute_quidax_buy(order: CryptoOrder, *, refund_on_fail: bool) -> CryptoOr
     _log(
         order,
         'quidax_buy_sent',
-        f'market={market} volume={volume} quidax_order_id={quidax_order_id}',
+        f'market={market} volume={_plain_decimal(bought)} quidax_order_id={quidax_order_id}',
     )
-    return _complete_buy(order, quidax_order_id)
+    return _complete_buy(order, quidax_order_id, bought=bought)
 
 
-def _complete_buy(order: CryptoOrder, quidax_order_id: str) -> CryptoOrder:
+def _complete_buy(
+    order: CryptoOrder, quidax_order_id: str, *, bought: Decimal | None = None
+) -> CryptoOrder:
+    """bought is the amount Quidax actually filled when precision forced it
+    below the quote; the shortfall's NGN value goes to the user's wallet."""
+    dust_ngn = Decimal('0')
     with transaction.atomic():
         locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
         if locked.status == OrderStatus.COMPLETED:
             return locked
+        update_fields = ['quidax_order_id', 'status', 'updated_at']
+        if bought is not None and bought < locked.coin_amount:
+            dust_ngn = ((locked.coin_amount - bought) * locked.rate_ngn).quantize(
+                Decimal('0.01'), rounding=ROUND_DOWN
+            )
+            locked.coin_amount = bought
+            update_fields.append('coin_amount')
         locked.quidax_order_id = quidax_order_id or locked.quidax_order_id
         locked.status = OrderStatus.COMPLETED
-        locked.save(update_fields=['quidax_order_id', 'status', 'updated_at'])
+        locked.save(update_fields=update_fields)
         credit_crypto_available(locked.user, locked.coin, locked.coin_amount)
+        if dust_ngn > 0:
+            credit_wallet(locked.user, dust_ngn)
 
-    _log(order, 'order_completed', f'Credited {order.coin_amount} {order.coin.upper()} to wallet.')
     order.refresh_from_db()
+    _log(order, 'order_completed', f'Credited {order.coin_amount} {order.coin.upper()} to wallet.')
+    if dust_ngn > 0:
+        _log(order, 'precision_remainder_refunded', f'Credited ₦{dust_ngn} (amount below market precision) to NGN wallet.')
     return order
 
 

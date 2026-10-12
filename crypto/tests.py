@@ -604,9 +604,9 @@ class UnknownOutcomeTests(SettlementTestBase):
         quote = create_quote(self.user, quote_type=QuoteType.SELL, coin='usdt', amount=Decimal(amount))
         return place_sell_order(self.user, quote_id=quote.id, pin='1234')
 
-    def _buy(self):
+    def _buy(self, amount='10'):
         Wallet.objects.update_or_create(user=self.user, defaults={'ngn_balance': Decimal('20000')})
-        quote = create_quote(self.user, quote_type=QuoteType.BUY, coin='usdt', amount=Decimal('10'))
+        quote = create_quote(self.user, quote_type=QuoteType.BUY, coin='usdt', amount=Decimal(amount))
         return place_buy_order(self.user, quote_id=quote.id, pin='1234')
 
     def _swap(self):
@@ -662,6 +662,17 @@ class UnknownOutcomeTests(SettlementTestBase):
         self.assertEqual(order.status, OrderStatus.COMPLETED)
         self.assertEqual(self.crypto().available, Decimal('10'))
         self.assertEqual(self.ngn(), Decimal('20000') - order.total_ngn)
+
+    def test_buy_retries_with_fewer_decimals_on_precision_error(self):
+        precision = QuidaxError('Price or quantity precision exceeds maximum limit', status_code=422)
+        self.q.sell_errors = [precision, None]
+        order = self._buy(amount='10.5')
+        self.assertEqual(order.status, OrderStatus.COMPLETED)
+        self.assertEqual([o['volume'] for o in self.q.orders], ['10.5', '10'])
+        self.assertEqual(order.coin_amount, Decimal('10'))
+        self.assertEqual(self.crypto().available, Decimal('10'))
+        dust = (Decimal('0.5') * order.rate_ngn).quantize(Decimal('0.01'))
+        self.assertEqual(self.ngn(), Decimal('20000') - order.total_ngn + dust, '0.5 USDT remainder paid in NGN')
 
     def test_buy_refused_still_refunds_immediately(self):
         self.q.sell_errors = [QuidaxError('Market closed', status_code=422)]
