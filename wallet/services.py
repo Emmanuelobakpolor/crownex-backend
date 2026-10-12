@@ -8,6 +8,7 @@ client call all safe to run more than once for the same reference.
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 
 from django.conf import settings
@@ -22,6 +23,8 @@ from .models import (
     Wallet,
     generate_withdrawal_reference,
 )
+
+logger = logging.getLogger(__name__)
 
 MIN_DEPOSIT = Decimal('100')
 MIN_WITHDRAWAL = Decimal('500')
@@ -241,6 +244,10 @@ def request_withdrawal(
             beneficiary_name=account_name,
         )
     except FlutterwaveError as exc:
+        logger.error(
+            'Flutterwave transfer failed for %s (bank=%s): %s | payload=%s',
+            tx.reference, bank_code, exc.message, getattr(exc, 'payload', None),
+        )
         _refund_and_fail(tx.pk, f'Transfer request failed: {exc.message}')
         raise WalletServiceError(
             'Withdrawal could not be initiated. Your balance has been refunded.',
@@ -250,6 +257,7 @@ def request_withdrawal(
 
     if payload.get('status') != 'success':
         note = payload.get('message', 'Transfer rejected by Flutterwave.')
+        logger.error('Flutterwave rejected transfer %s (bank=%s): %s', tx.reference, bank_code, payload)
         _refund_and_fail(tx.pk, note)
         raise WalletServiceError(
             'Withdrawal could not be initiated. Your balance has been refunded.',
