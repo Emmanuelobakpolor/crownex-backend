@@ -402,6 +402,38 @@ def _instant_swap_gross(coin: str, to_coin: str, amount: Decimal) -> Decimal:
     return gross
 
 
+def _instant_buy_rate(coin: str, ngn_estimate: Decimal) -> Decimal:
+    """NGN per coin as Quidax Instant Swap prices NGN -> coin right now, for
+    buys executed through it. The ticker's last trade can sit a percent or
+    more below what the swap actually charges, which would make every buy
+    fail the execution-time slippage check. Rounded UP so the naira the
+    user pays always covers the coin they were quoted."""
+    spend = ngn_estimate.quantize(Decimal('1'), rounding=ROUND_DOWN)
+    try:
+        payload = quidax.create_swap_quotation(
+            from_currency='ngn',
+            to_currency=coin,
+            from_amount=plain_decimal(spend),
+            user_id=settings.QUIDAX_USER_ID,
+        )
+    except QuidaxError as exc:
+        if exc.status_code is None or exc.status_code >= 500:
+            raise CryptoServiceError(
+                'Could not reach our crypto provider. Please try again.', code='quidax_unreachable', status=502
+            )
+        raise CryptoServiceError(
+            f'Buying {coin.upper()} is not available for this amount right now.', code='unsupported_pair'
+        )
+    data = payload.get('data') if isinstance(payload, dict) else None
+    data = data if isinstance(data, dict) else {}
+    gross = quidax_decimal(data.get('to_amount'))
+    if gross is None or gross <= 0 or str(data.get('to_currency', coin)).lower() != coin:
+        raise CryptoServiceError(
+            'Could not get a price right now. Please try again.', code='buy_quote_invalid', status=502
+        )
+    return (spend / gross).quantize(Decimal('0.01'), rounding=ROUND_UP)
+
+
 def swap_fee_to_coin(fee_ngn: Decimal, to_rate: Decimal) -> Decimal:
     """Our swap fee in the destination coin — rounded UP so the user's share
     (gross - fee) only ever rounds down, never past what Quidax delivers."""
@@ -495,6 +527,9 @@ def create_quote(
             to_coin_amount = (net_ngn / to_rate).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
 
     elif quote_type == QuoteType.BUY:
+        if getattr(settings, 'QUIDAX_INSTANT_BUY_ENABLED', False):
+            rate = _instant_buy_rate(coin, ngn_value)
+            ngn_value = (rate * amount).quantize(Decimal('0.01'), rounding=ROUND_UP)
         fee_ngn = compute_fee_ngn(FeeType.BUY, ngn_value)
         total_ngn = ngn_value + fee_ngn
 

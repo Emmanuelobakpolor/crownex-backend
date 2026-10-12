@@ -843,36 +843,53 @@ class InstantBuyTests(SettlementTestBase):
         self.user.set_transaction_pin('1234')
         self.user.save()
 
-    def _buy(self, amount='1.003', balance='20000'):
-        # 1.003 USDT at ₦1,500 = ₦1,504.50 -> spends ₦1,504, ₦0.50 kobo back.
+    def _buy(self, amount='1.003', balance='20000', price_at_execution=None):
+        # 1.003 USDT at ~₦1,500 = ~₦1,504.5 -> spends ₦1,504, kobo back.
         Wallet.objects.update_or_create(user=self.user, defaults={'ngn_balance': Decimal(balance)})
         quote = create_quote(self.user, quote_type=QuoteType.BUY, coin='usdt', amount=Decimal(amount))
+        if price_at_execution is not None:
+            self.q.swap_price = Decimal(price_at_execution)
         return place_buy_order(self.user, quote_id=quote.id, pin='1234')
 
     def test_completed_credits_delivered_coin_and_refunds_kobo(self):
         order = self._buy()
         self.assertEqual(order.status, OrderStatus.COMPLETED)
         self.assertEqual(self.q.orders, [], 'no market order')
-        self.assertEqual(self.q.swap_quotes[0]['from_currency'], 'ngn')
-        self.assertEqual(self.q.swap_quotes[0]['from_amount'], '1504')
+        execution = self.q.swap_quotes[-1]
+        self.assertEqual((execution['from_currency'], execution['from_amount']), ('ngn', '1504'))
         delivered = Decimal('1.00266666')
         self.assertEqual(order.coin_amount, delivered)
         self.assertEqual(self.crypto().available, delivered)
-        self.assertEqual(self.ngn(), Decimal('20000') - order.total_ngn + Decimal('0.50'))
+        self.assertEqual(self.ngn(), Decimal('20000') - Decimal('1504') - order.fee_ngn, 'paid ₦1,504 + fee, kobo back')
+
+    def test_quote_priced_from_instant_swap_not_ticker(self):
+        # Swap charges 2% over the ticker's last trade: pricing the quote from
+        # the ticker made every buy fail the 1% slippage check.
+        self.q.swap_price = Decimal('1530')
+        order = self._buy()
+        self.assertEqual(order.status, OrderStatus.COMPLETED)
+        self.assertAlmostEqual(order.rate_ngn, Decimal('1530'), delta=Decimal('0.02'))
+        self.assertGreaterEqual(self.crypto().available, Decimal('1.003') * Decimal('0.99'))
 
     def test_quotation_refused_fails_and_refunds(self):
+        Wallet.objects.update_or_create(user=self.user, defaults={'ngn_balance': Decimal('20000')})
+        quote = create_quote(self.user, quote_type=QuoteType.BUY, coin='usdt', amount=Decimal('1.003'))
         self.q.swap_quote_errors = [QuidaxError('Pair not supported', status_code=422)]
-        order = self._buy()
+        order = place_buy_order(self.user, quote_id=quote.id, pin='1234')
         self.assertEqual((order.status, order.needs_review), (OrderStatus.FAILED, False))
         self.assertEqual(self.ngn(), Decimal('20000'))
         self.assertEqual(self.q.swaps, {})
 
     def test_price_moved_fails_and_refunds_without_confirming(self):
-        self.q.swap_price = Decimal('1600')
-        order = self._buy()
+        order = self._buy(price_at_execution='1600')
         self.assertEqual(order.status, OrderStatus.FAILED)
         self.assertEqual(self.ngn(), Decimal('20000'))
         self.assertEqual(self.q.swaps, {})
+
+    def test_quote_refused_when_quidax_cannot_price_the_buy(self):
+        self.q.swap_quote_errors = [QuidaxError('Pair not supported', status_code=422)]
+        with self.assertRaises(CryptoServiceError):
+            self._buy()
 
     def test_confirm_timeout_holds_ngn_until_admin_resolves(self):
         self.q.confirm_errors = [QuidaxError('Could not reach Quidax: timeout')]
@@ -896,7 +913,7 @@ class InstantBuyTests(SettlementTestBase):
         order.refresh_from_db()
         self.assertEqual(order.status, OrderStatus.COMPLETED)
         self.assertEqual(self.crypto().available, Decimal('1.00266666'))
-        self.assertEqual(self.ngn(), Decimal('20000') - order.total_ngn + Decimal('0.50'))
+        self.assertEqual(self.ngn(), Decimal('20000') - Decimal('1504') - order.fee_ngn)
 
     def test_failed_webhook_refunds_once(self):
         self.q.swap_status = 'initiated'
