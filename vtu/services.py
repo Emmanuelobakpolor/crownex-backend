@@ -12,6 +12,7 @@ wallet withdrawal flow.
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 
 from django.core.cache import cache
@@ -28,6 +29,8 @@ from .models import (
     generate_vtu_reference,
 )
 from .pluginng import PluginNGError
+
+logger = logging.getLogger(__name__)
 
 MIN_AIRTIME = Decimal('50')
 MAX_AIRTIME = Decimal('50000')
@@ -73,6 +76,7 @@ def _raw_plans() -> list[dict]:
     try:
         payload = pluginng.get_plans()
     except PluginNGError as exc:
+        logger.error('PluginNG get_plans failed: %s | payload=%s', exc.message, exc.payload)
         raise VTUServiceError(
             f'Could not load plans: {exc.message}',
             code='pluginng_unreachable',
@@ -350,6 +354,10 @@ def buy_data(
             subcategory_id=subcategory_id, custom_reference=tx.reference,
         )
     except PluginNGError as exc:
+        logger.error(
+            'PluginNG data purchase failed for %s (plan=%s, subcategory=%s): %s | payload=%s',
+            tx.reference, plan_id, subcategory_id, exc.message, exc.payload,
+        )
         _refund_and_fail(tx.pk, f'Purchase request failed: {exc.message}')
         raise VTUServiceError(
             'Data purchase could not be completed. Your balance has been refunded.',
