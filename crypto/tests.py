@@ -935,6 +935,89 @@ class InstantBuyTests(SettlementTestBase):
         self.assertEqual(self.ngn(), Decimal('0'))
 
 
+@override_settings(
+    QUIDAX_INSTANT_BUY_ENABLED=True,
+    QUIDAX_INSTANT_SWAP_ENABLED=False,
+    QUIDAX_INSTANT_SWAP_WAIT_SECONDS=0,
+)
+class TwoLegSwapInstantBuyLegTests(SettlementTestBase):
+    """Two-leg swap with QUIDAX_INSTANT_BUY_ENABLED: sell leg is a market
+    order, the NGN -> destination leg goes through Instant Swap."""
+
+    def setUp(self):
+        super().setUp()
+        self.user.set_transaction_pin('1234')
+        self.user.save()
+
+    def _swap(self, price_at_execution=None):
+        CryptoWallet.objects.update_or_create(user=self.user, coin='usdt', defaults={'available': Decimal('10')})
+        quote = create_quote(
+            self.user, quote_type=QuoteType.SWAP, coin='usdt', amount=Decimal('10'), to_coin='btc'
+        )
+        if price_at_execution is not None:
+            self.q.swap_price = Decimal(price_at_execution)
+        return place_swap_order(self.user, quote_id=quote.id, pin='1234')
+
+    def net(self, order):
+        return order.total_ngn - order.fee_ngn
+
+    def test_buy_leg_through_instant_swap_credits_delivered_coin(self):
+        order = self._swap()
+        self.assertEqual(order.status, OrderStatus.COMPLETED)
+        self.assertEqual([o['side'] for o in self.q.orders], ['sell'], 'only the sell leg is a market order')
+        leg = self.q.swap_quotes[-1]
+        spend = self.net(order).quantize(Decimal('1'), rounding=ROUND_DOWN)
+        self.assertEqual((leg['from_currency'], leg['to_currency'], leg['from_amount']), ('ngn', 'btc', str(spend)))
+        self.assertEqual(self.crypto().total, Decimal('0'))
+        self.assertEqual(self.crypto(coin='btc').available, order.to_coin_amount)
+        self.assertGreater(order.to_coin_amount, Decimal('0'))
+        self.assertEqual(self.ngn(), self.net(order) - spend, 'kobo back')
+
+    def test_buy_leg_refused_pays_net_ngn(self):
+        CryptoWallet.objects.update_or_create(user=self.user, coin='usdt', defaults={'available': Decimal('10')})
+        quote = create_quote(self.user, quote_type=QuoteType.SWAP, coin='usdt', amount=Decimal('10'), to_coin='btc')
+        self.q.swap_quote_errors = [QuidaxError('Pair not supported', status_code=422)]
+        order = place_swap_order(self.user, quote_id=quote.id, pin='1234')
+        self.assertEqual((order.status, order.needs_review), (OrderStatus.FAILED, False))
+        self.assertEqual(self.crypto().total, Decimal('0'), 'sell leg done: source debited')
+        self.assertEqual(self.ngn(), self.net(order))
+
+    def test_price_moved_on_buy_leg_pays_net_ngn(self):
+        order = self._swap(price_at_execution='1600')
+        self.assertEqual(order.status, OrderStatus.FAILED)
+        self.assertEqual(self.q.swaps, {}, 'never confirmed')
+        self.assertEqual(self.crypto().total, Decimal('0'))
+        self.assertEqual(self.ngn(), self.net(order))
+
+    def test_buy_leg_unknown_then_webhook_completes_once(self):
+        self.q.swap_status = 'initiated'
+        order = self._swap()
+        self.assertEqual(order.status, OrderStatus.PROCESSING)
+        self.assertEqual(self.crypto().total, Decimal('0'))
+
+        swap = {**self.q.swaps['swap-1'], 'status': 'completed'}
+        handle_swap_webhook({'event': 'swap_transaction.completed', 'data': swap})
+        handle_swap_webhook({'event': 'swap_transaction.completed', 'data': swap})
+        order.refresh_from_db()
+        self.assertEqual(order.status, OrderStatus.COMPLETED)
+        self.assertEqual(self.crypto(coin='btc').available, Decimal(swap['received_amount']))
+
+    def test_buy_leg_confirm_timeout_resolved_not_executed_pays_ngn(self):
+        CryptoWallet.objects.update_or_create(user=self.user, coin='usdt', defaults={'available': Decimal('10')})
+        quote = create_quote(self.user, quote_type=QuoteType.SWAP, coin='usdt', amount=Decimal('10'), to_coin='btc')
+        self.q.confirm_errors = [QuidaxError('Internal server error', status_code=500)]
+        order = place_swap_order(self.user, quote_id=quote.id, pin='1234')
+        self.assertEqual((order.status, order.needs_review), (OrderStatus.PROCESSING, True))
+        self.assertEqual(self.ngn(), Decimal('0'))
+
+        order = admin_resolve_unknown_order(order, executed=False)
+        self.assertEqual(order.status, OrderStatus.FAILED)
+        self.assertEqual(self.ngn(), self.net(order))
+        with self.assertRaises(CryptoServiceError):
+            admin_resolve_unknown_order(order, executed=False)
+        self.assertEqual(self.ngn(), self.net(order))
+
+
 class QuidaxClientRetryTests(TestCase):
     @override_settings(QUIDAX_SECRET_KEY='k')
     def test_retry_false_sends_once_on_5xx(self):

@@ -524,6 +524,15 @@ def create_quote(
             if to_coin_amount <= 0:
                 raise CryptoServiceError('Amount too small after fees.', code='amount_too_low')
         else:
+            if getattr(settings, 'QUIDAX_INSTANT_BUY_ENABLED', False):
+                # The buy leg runs through Instant Swap (orders._execute_swap_buy_leg_instant):
+                # price it from Quidax's own NGN -> coin quote, and refuse up
+                # front what it can't buy rather than after the sell leg.
+                if net_ngn.quantize(Decimal('1'), rounding=ROUND_DOWN) < MIN_ORDER_NOTIONAL_NGN:
+                    raise CryptoServiceError(
+                        f'Minimum swap amount is ₦{MIN_ORDER_NOTIONAL_NGN} after fees.', code='amount_too_low'
+                    )
+                to_rate = _instant_buy_rate(to_coin_clean, net_ngn)
             to_coin_amount = (net_ngn / to_rate).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
 
     elif quote_type == QuoteType.BUY:
