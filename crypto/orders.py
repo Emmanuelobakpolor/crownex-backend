@@ -476,6 +476,10 @@ def _market_buy_fitting_precision(market: str, amount: Decimal) -> tuple[dict, D
         except QuidaxError as exc:
             if not _is_precision_error(exc) or decimals == 0:
                 raise
+            logger.warning(
+                'Quidax %s rejected volume %s for precision; retrying with %d decimals.',
+                market, _plain_decimal(volume), decimals - 1,
+            )
             decimals -= 1
             volume = amount.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_DOWN)
             if volume <= 0:
