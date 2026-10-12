@@ -322,6 +322,10 @@ def buy_airtime(
             subcategory_id=subcategory_id, custom_reference=tx.reference,
         )
     except PluginNGError as exc:
+        logger.error(
+            'PluginNG airtime purchase failed for %s (amount=%s, subcategory=%s): %s | payload=%s',
+            tx.reference, amount, subcategory_id, exc.message, exc.payload,
+        )
         _refund_and_fail(tx.pk, f'Purchase request failed: {exc.message}')
         raise VTUServiceError(
             'Airtime purchase could not be completed. Your balance has been refunded.',

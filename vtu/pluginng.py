@@ -19,12 +19,15 @@ reversed. See models.PLUGINNG_STATUS_MAP.
 
 from __future__ import annotations
 
+import logging
+
 import requests
 from django.conf import settings
 from django.core.cache import cache
 
 PLUGINNG_BASE_URL = getattr(settings, 'PLUGINNG_BASE_URL', 'https://pluginng.com/api')
 _TIMEOUT = 30
+logger = logging.getLogger(__name__)
 _TOKEN_CACHE_KEY = 'vtu:pluginng:token'
 _TOKEN_CACHE_TTL = 50 * 60  # 50 min — PluginNG doesn't document token expiry,
 # so we refresh proactively well inside any plausible 1-hour-style window.
@@ -96,6 +99,7 @@ def _send(method: str, url: str, token: str, **kwargs) -> requests.Response:
             method, url, headers=_headers(token), timeout=_TIMEOUT, **kwargs
         )
     except requests.RequestException as exc:
+        logger.error('PluginNG %s %s unreachable: %s', method, url, exc)
         raise PluginNGError(f'Could not reach PluginNG: {exc}') from exc
 
 
@@ -103,6 +107,10 @@ def _parse(response: requests.Response) -> dict:
     try:
         return response.json()
     except ValueError as exc:
+        logger.error(
+            'PluginNG %s %s returned non-JSON (HTTP %s): %.500s',
+            response.request.method, response.url, response.status_code, response.text,
+        )
         raise PluginNGError('PluginNG returned a non-JSON response.') from exc
 
 
@@ -132,6 +140,7 @@ def _request(method: str, path: str, **kwargs) -> dict:
         payload = _parse(response)
 
     if not response.ok:
+        logger.error('PluginNG %s %s failed (HTTP %s): %s', method, path, response.status_code, payload)
         raise PluginNGError(
             payload.get('message')
             or f'PluginNG returned {response.status_code}.',
