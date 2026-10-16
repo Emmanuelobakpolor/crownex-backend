@@ -17,8 +17,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import deposits, orders, services, settlements, withdrawals
-from .models import OrderStatus
+from .models import CryptoDepositEvent, OrderStatus
 from .serializers import (
+    CryptoDepositSerializer,
     CryptoOrderSerializer,
     CryptoQuoteRequestSerializer,
     CryptoQuoteSerializer,
@@ -258,6 +259,19 @@ class OrderHistoryView(APIView):
     def get(self, request):
         history = orders.list_orders(request.user)
         return Response(CryptoOrderSerializer(history, many=True, context={'request': request}).data)
+
+
+class DepositHistoryView(APIView):
+    """GET /api/crypto/deposits/ — latest 50 credited deposits for the
+    current user, each with its auto-convert outcome."""
+
+    def get(self, request):
+        history = (
+            CryptoDepositEvent.objects.filter(user=request.user)
+            .select_related('settlement', 'settlement__order')
+            .order_by('-created_at')[:50]
+        )
+        return Response(CryptoDepositSerializer(history, many=True).data)
 
 
 class DepositAddressView(APIView):

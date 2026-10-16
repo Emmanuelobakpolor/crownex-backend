@@ -22,6 +22,7 @@ urlpatterns = [
         name='crypto-sell-retry',
     ),
     path('orders/swap/', views.SwapOrderView.as_view(), name='crypto-swap'),
+    path('deposits/', views.DepositHistoryView.as_view(), name='crypto-deposits'),
     path('address/<str:coin>/', views.DepositAddressView.as_view(), name='crypto-address'),
     path('account/ensure/', views.EnsureAccountView.as_view(), name='crypto-account-ensure'),
     path('settings/', views.CryptoSettingsView.as_view(), name='crypto-settings'),

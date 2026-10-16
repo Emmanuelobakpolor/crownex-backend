@@ -6,11 +6,13 @@ from rest_framework import serializers
 
 from .models import (
     CryptoDepositAddress,
+    CryptoDepositEvent,
     CryptoFeeSettings,
     CryptoOrder,
     CryptoQuote,
     CryptoWallet,
     CryptoWithdrawal,
+    SettlementStatus,
 )
 from .services import coin_name
 
@@ -169,6 +171,76 @@ class DepositAddressSerializer(serializers.ModelSerializer):
         model = CryptoDepositAddress
         fields = ['coin', 'network', 'address', 'created_at']
         read_only_fields = fields
+
+
+class CryptoDepositSerializer(serializers.ModelSerializer):
+    """One credited deposit plus what happened to it — the app's history
+    shows it as held crypto or, with auto-convert, the NGN it became.
+
+    conversion_status: held (auto-convert off), converting, converted,
+    skipped (below the minimum sell / no NGN market) or failed."""
+
+    auto_convert = serializers.SerializerMethodField()
+    conversion_status = serializers.SerializerMethodField()
+    ngn_amount = serializers.SerializerMethodField()
+    rate_ngn = serializers.SerializerMethodField()
+    order_reference = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CryptoDepositEvent
+        fields = [
+            'id',
+            'coin',
+            'amount',
+            'auto_convert',
+            'conversion_status',
+            'ngn_amount',
+            'rate_ngn',
+            'order_reference',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+    @staticmethod
+    def _settlement(obj: CryptoDepositEvent):
+        try:
+            return obj.settlement
+        except CryptoDepositEvent.settlement.RelatedObjectDoesNotExist:
+            return None  # credited before settlements existed
+
+    def _converted_order(self, obj: CryptoDepositEvent):
+        s = self._settlement(obj)
+        if s and s.auto_convert and s.status == SettlementStatus.COMPLETED and s.order_id:
+            return s.order
+        return None
+
+    def get_auto_convert(self, obj: CryptoDepositEvent) -> bool:
+        s = self._settlement(obj)
+        return bool(s and s.auto_convert)
+
+    def get_conversion_status(self, obj: CryptoDepositEvent) -> str:
+        s = self._settlement(obj)
+        if not s or not s.auto_convert:
+            return 'held'
+        if self._converted_order(obj):
+            return 'converted'
+        if s.status == SettlementStatus.SKIPPED:
+            return 'skipped'
+        if s.status == SettlementStatus.FAILED:
+            return 'failed'
+        return 'converting'
+
+    def get_ngn_amount(self, obj: CryptoDepositEvent) -> str | None:
+        order = self._converted_order(obj)
+        return str(order.total_ngn) if order else None
+
+    def get_rate_ngn(self, obj: CryptoDepositEvent) -> str | None:
+        order = self._converted_order(obj)
+        return str(order.rate_ngn) if order else None
+
+    def get_order_reference(self, obj: CryptoDepositEvent) -> str | None:
+        order = self._converted_order(obj)
+        return order.reference if order else None
 
 
 class CryptoWithdrawalSerializer(serializers.ModelSerializer):

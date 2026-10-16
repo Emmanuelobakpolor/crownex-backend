@@ -602,6 +602,56 @@ class CryptoSettingsEndpointTests(SettlementTestBase):
         self.assertTrue(self.user.auto_convert_crypto_deposits)
 
 
+class DepositHistoryEndpointTests(SettlementTestBase):
+    def history(self, user=None):
+        client = APIClient()
+        client.force_authenticate(user or self.user)
+        response = client.get('/api/crypto/deposits/')
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def test_held_deposit(self):
+        self.deposit('dep-1')
+        self.run_worker()
+        [row] = self.history()
+        self.assertEqual(row['conversion_status'], 'held')
+        self.assertFalse(row['auto_convert'])
+        self.assertIsNone(row['ngn_amount'])
+        self.assertEqual(Decimal(row['amount']), Decimal('100'))
+
+    def test_converting_then_converted(self):
+        self.enable_auto_convert()
+        s = self.deposit('dep-1')
+        self.assertEqual(self.history()[0]['conversion_status'], 'converting')
+        self.run_worker()
+        s.refresh_from_db()
+        [row] = self.history()
+        self.assertEqual(row['conversion_status'], 'converted')
+        self.assertEqual(Decimal(row['ngn_amount']), s.order.total_ngn)
+        self.assertEqual(Decimal(row['rate_ngn']), RATE)
+        self.assertEqual(row['order_reference'], s.order.reference)
+
+    def test_skipped_deposit(self):
+        self.enable_auto_convert()
+        self.deposit('dep-1', amount='0.5')
+        self.run_worker()
+        [row] = self.history()
+        self.assertEqual(row['conversion_status'], 'skipped')
+        self.assertIsNone(row['ngn_amount'])
+
+    def test_deposit_without_settlement_is_held(self):
+        CryptoDepositEvent.objects.create(
+            quidax_deposit_id='old-1', user=self.user, coin='usdt', amount=Decimal('5')
+        )
+        self.assertEqual(self.history()[0]['conversion_status'], 'held')
+
+    def test_only_own_deposits(self):
+        bola = self._make_user('bola@example.com', 'sub-2')
+        self.deposit('dep-1')
+        self.assertEqual(self.history(bola), [])
+        self.assertEqual(len(self.history()), 1)
+
+
 class BackfillSweepTests(SettlementTestBase):
     def _old_deposit(self, deposit_id, amount='40'):
         """A deposit credited before settlements existed: event + balance, no settlement."""
