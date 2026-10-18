@@ -1145,3 +1145,29 @@ class DepositAddressTests(SettlementTestBase):
             record = get_deposit_address(self.user, 'usdt', network='ERC20')
         self.assertEqual(record.address, self.EVM)
         create.assert_not_called()
+
+
+class NetworkValidationTests(TestCase):
+    def test_supported_networks(self):
+        from .services import validate_network
+
+        self.assertEqual(validate_network('usdt', 'trc20'), 'TRC20')
+        self.assertEqual(validate_network('usdt', 'BEP20'), 'BEP20')
+        self.assertEqual(validate_network('usdc', 'polygon'), 'POLYGON')
+        self.assertEqual(validate_network('btc', None), '')
+
+    def test_unsupported_or_missing_network_is_rejected(self):
+        from .services import validate_network
+
+        for coin, network in (('usdc', 'TRC20'), ('usdt', None), ('usdt', 'SOLANA')):
+            with self.assertRaises(CryptoServiceError) as ctx:
+                validate_network(coin, network)
+            self.assertEqual(ctx.exception.code, 'unsupported_network')
+
+    def test_deposit_address_rejects_usdc_trc20_without_calling_quidax(self):
+        from .deposits import get_deposit_address
+
+        user = User.objects.create_user(email='n@example.com', password='x', full_name='N N')
+        with mock.patch('crypto.quidax.requests.request', side_effect=AssertionError('real Quidax call')):
+            with self.assertRaises(CryptoServiceError):
+                get_deposit_address(user, 'usdc', network='TRC20')

@@ -93,6 +93,29 @@ SWAP_ONLY_COINS: dict[str, dict] = {
 
 CAPABILITIES = ('buy_sell', 'swap', 'deposit', 'withdraw')
 
+# Coins that need a network picked for deposits/withdrawals, and which ones
+# we offer — a subset of what Quidax supports (USDC has no TRC20 there).
+# Keep in sync with lib/models/crypto.dart:kCryptoCoinNetworks.
+COIN_NETWORKS: dict[str, tuple[str, ...]] = {
+    'usdt': ('TRC20', 'ERC20', 'BEP20'),
+    'usdc': ('ERC20', 'BEP20', 'POLYGON'),
+}
+
+
+def validate_network(coin: str, network: str | None) -> str:
+    """Normalised (uppercase) network, or '' for single-network coins.
+    Rejects a missing or unsupported network for coins in COIN_NETWORKS."""
+    network_key = (network or '').upper()
+    allowed = COIN_NETWORKS.get(coin)
+    if allowed is None:
+        return network_key
+    if network_key not in allowed:
+        raise CryptoServiceError(
+            f'{coin.upper()} is supported on {", ".join(allowed)} only.',
+            code='unsupported_network',
+        )
+    return network_key
+
 
 def instant_swap_enabled() -> bool:
     return bool(getattr(settings, 'QUIDAX_INSTANT_SWAP_ENABLED', False))

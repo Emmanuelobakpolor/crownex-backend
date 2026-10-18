@@ -24,7 +24,7 @@ from . import quidax, settlements
 from .models import CryptoDepositAddress, CryptoDepositEvent, CryptoOrder, OrderStatus, QuidaxSubAccount
 from .orders import _log as _log_order_event
 from .quidax import QuidaxError
-from .services import CryptoServiceError, _validate_coin, credit_crypto_available
+from .services import CryptoServiceError, _validate_coin, credit_crypto_available, validate_network
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ def _pick_address(payload: dict, network_key: str) -> tuple[str, str] | None:
 
 def get_deposit_address(user, coin: str, *, network: str | None = None) -> CryptoDepositAddress:
     coin = _validate_coin(coin, 'deposit')
-    network_key = (network or '').upper()
+    network_key = validate_network(coin, network)
 
     cached = CryptoDepositAddress.objects.filter(user=user, coin=coin, network=network_key).first()
     if cached:

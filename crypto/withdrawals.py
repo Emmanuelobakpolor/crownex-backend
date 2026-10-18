@@ -36,6 +36,7 @@ from .services import (
     get_coin_rate_ngn,
     release_reserved_crypto,
     reserve_crypto,
+    validate_network,
 )
 
 # Loose but real per-(coin, network) address shape checks — enough to catch
@@ -51,8 +52,10 @@ _ADDRESS_PATTERNS: dict[tuple[str, str], re.Pattern] = {
     ('eth', ''): _EVM_ADDRESS,
     ('usdt', 'ERC20'): _EVM_ADDRESS,
     ('usdt', 'TRC20'): _TRON_ADDRESS,
+    ('usdt', 'BEP20'): _EVM_ADDRESS,
     ('usdc', 'ERC20'): _EVM_ADDRESS,
-    ('usdc', 'TRC20'): _TRON_ADDRESS,
+    ('usdc', 'BEP20'): _EVM_ADDRESS,
+    ('usdc', 'POLYGON'): _EVM_ADDRESS,
     ('sol', ''): re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$'),
     ('trx', ''): _TRON_ADDRESS,
     ('ltc', ''): re.compile(r'^(ltc1[a-z0-9]{25,59}|[LM3][a-km-zA-HJ-NP-Z1-9]{25,34})$'),
@@ -255,10 +258,10 @@ def request_withdrawal(
     check_transaction_pin(user, pin)
 
     address = address.strip()
-    network = (network or '').upper()
 
     estimate = estimate_withdrawal(coin=coin, amount=amount)
     coin = estimate['coin']
+    network = validate_network(coin, network)
     _validate_address(coin, network, address)
 
     rate = Decimal(estimate['rate_ngn'])
