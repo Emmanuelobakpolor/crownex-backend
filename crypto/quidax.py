@@ -170,9 +170,13 @@ def list_deposit_addresses(user_id: str, currency: str) -> dict:
 
 
 def create_deposit_address(user_id: str, currency: str, *, network: str | None = None) -> dict:
-    """POST /users/{user_id}/wallets/{currency}/addresses"""
-    payload = {'network': network} if network else {}
-    return _request('POST', f'/users/{user_id}/wallets/{currency}/addresses', json=payload)
+    """POST /users/{user_id}/wallets/{currency}/addresses?network=trc20
+
+    Quidax reads network from the query string, lowercase. Sent in the JSON
+    body it's silently ignored and the coin's default (EVM, 0x...) address
+    is created instead — which is why USDT TRC20 never appeared."""
+    params = {'network': network.lower()} if network else None
+    return _request('POST', f'/users/{user_id}/wallets/{currency}/addresses', params=params)
 
 
 # ─── Deposits ───────────────────────────────────────────────────────────────

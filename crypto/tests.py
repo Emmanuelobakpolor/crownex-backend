@@ -1107,3 +1107,41 @@ class MasterBalancesEndpointTests(SettlementTestBase):
         client = APIClient()
         client.force_authenticate(self.user)
         self.assertEqual(client.get('/api/admin/crypto/master-balances/').status_code, 403)
+
+
+class DepositAddressTests(SettlementTestBase):
+    EVM = '0x06ef2F61Aa2eE9DDf16e1D0b0793f1C1AFb4be12'
+    TRON = 'TMNYqtgxQ2P8wu6omRZVYtuDiEd1ZhfjMe'
+
+    def _rows(self, *networks):
+        return {'data': [{'id': n, 'network': n, 'address': self.TRON if n == 'TRC20' else self.EVM} for n in networks]}
+
+    def test_create_sends_network_as_lowercase_query_param(self):
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {'status': 'success', 'data': {}}
+        with mock.patch('crypto.quidax.requests.request', return_value=response) as request:
+            quidax.create_deposit_address('sub-1', 'usdt', network='TRC20')
+        kwargs = request.call_args.kwargs
+        self.assertEqual(kwargs.get('params'), {'network': 'trc20'})
+        self.assertNotIn('network', kwargs.get('json') or {})
+
+    def test_trc20_uses_address_from_create_response(self):
+        from .deposits import get_deposit_address
+
+        created = {'data': {'id': 'new', 'network': 'TRC20', 'address': self.TRON}}
+        with mock.patch('crypto.quidax.list_deposit_addresses', return_value=self._rows('BEP20', 'ERC20')), \
+                mock.patch('crypto.quidax.create_deposit_address', return_value=created) as create, \
+                mock.patch('crypto.deposits.time.sleep') as sleep:
+            record = get_deposit_address(self.user, 'usdt', network='TRC20')
+        self.assertEqual((record.network, record.address), ('TRC20', self.TRON))
+        create.assert_called_once_with('sub-1', 'usdt', network='TRC20')
+        sleep.assert_not_called()
+
+    def test_existing_network_address_is_reused_without_creating(self):
+        from .deposits import get_deposit_address
+
+        with mock.patch('crypto.quidax.list_deposit_addresses', return_value=self._rows('BEP20', 'ERC20')), \
+                mock.patch('crypto.quidax.create_deposit_address') as create:
+            record = get_deposit_address(self.user, 'usdt', network='ERC20')
+        self.assertEqual(record.address, self.EVM)
+        create.assert_not_called()

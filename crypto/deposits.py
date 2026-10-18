@@ -169,18 +169,22 @@ def get_deposit_address(user, coin: str, *, network: str | None = None) -> Crypt
 
     if not found:
         try:
-            quidax.create_deposit_address(sub_account.quidax_user_id, coin, network=network or None)
+            create_payload = quidax.create_deposit_address(
+                sub_account.quidax_user_id, coin, network=network or None
+            )
         except QuidaxError as exc:
             raise CryptoServiceError(
                 f'Could not create deposit address: {exc.message}',
                 code='quidax_unreachable',
                 status=502,
             )
+        # Usually the new address comes straight back in the create response.
+        found = _pick_address(create_payload, network_key)
 
         # Quidax generates some addresses asynchronously and notifies via the
         # wallet.address.generated webhook (see handle_address_generated_webhook) —
         # poll briefly here too as a fast-path in case it lands within a few seconds.
-        for _ in range(_ADDRESS_POLL_ATTEMPTS):
+        for _ in range(0 if found else _ADDRESS_POLL_ATTEMPTS):
             time.sleep(_ADDRESS_POLL_DELAY_SECONDS)
             try:
                 list_payload = quidax.list_deposit_addresses(sub_account.quidax_user_id, coin)
