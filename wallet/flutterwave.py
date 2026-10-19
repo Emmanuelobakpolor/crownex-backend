@@ -86,6 +86,17 @@ def initiate_transfer(
     )
 
 
+def get_transfer(transfer_id: str) -> dict:
+    """GET /transfers/{id} — current status of one transfer."""
+    return _request('GET', f'/transfers/{transfer_id}')
+
+
+def list_transfers(page: int = 1) -> dict:
+    """GET /transfers?page=N — newest first; used to find a transfer by our
+    reference when its Flutterwave id was never stored."""
+    return _request('GET', '/transfers', params={'page': page})
+
+
 def get_banks(country: str = 'NG') -> dict:
     """GET /banks/NG — list of Nigerian banks with their transfer codes."""
     return _request('GET', f'/banks/{country}')

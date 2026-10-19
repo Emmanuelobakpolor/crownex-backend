@@ -61,6 +61,9 @@ class Transaction(models.Model):
     # for withdrawals (Flutterwave transfer reference).
     reference = models.CharField(max_length=64, unique=True)
     flw_tx_ref = models.CharField(max_length=64, unique=True, null=True, blank=True)
+    # Flutterwave's id for a withdrawal's transfer — what reconciliation
+    # looks it up by when the transfer.completed webhook never arrives.
+    flw_transfer_id = models.CharField(max_length=32, blank=True)
 
     # Withdrawal destination — blank for deposits.
     bank_name = models.CharField(max_length=100, blank=True)

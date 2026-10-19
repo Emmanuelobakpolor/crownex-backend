@@ -12,6 +12,7 @@ a settlement that failed with "outcome unknown" may already have swept or
 sold on Quidax, and retrying it would do it again.
 """
 
+import logging
 import time
 
 from django.core.management.base import BaseCommand, CommandError
@@ -20,6 +21,9 @@ from django.db import close_old_connections
 from crypto import orders, settlements
 from crypto.models import CryptoDepositSettlement, SettlementStatus
 from crypto.services import CryptoServiceError
+from wallet.services import reconcile_pending_withdrawals
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -65,6 +69,12 @@ class Command(BaseCommand):
                 for order, before in orders.reconcile_due_instant_swaps():
                     if order.status != before:
                         self.stdout.write(f'Instant swap {order.reference}: {before} -> {order.status}')
+                # NGN bank withdrawals whose transfer.completed webhook never arrived.
+                try:
+                    for tx, before in reconcile_pending_withdrawals():
+                        self.stdout.write(f'Withdrawal {tx.reference}: {before} -> {tx.status}')
+                except Exception:
+                    logger.exception('withdrawal_reconcile_error')
             if not options['loop']:
                 return
             time.sleep(options['interval'])

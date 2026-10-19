@@ -9,10 +9,12 @@ client call all safe to run more than once for the same reference.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 
 from . import flutterwave
 from .flutterwave import FlutterwaveError
@@ -265,6 +267,10 @@ def request_withdrawal(
             status=502,
         )
 
+    transfer_id = str((payload.get('data') or {}).get('id') or '')
+    if transfer_id:
+        Transaction.objects.filter(pk=tx.pk).update(flw_transfer_id=transfer_id)
+        tx.flw_transfer_id = transfer_id
     return tx
 
 
@@ -285,6 +291,81 @@ def handle_transfer_webhook(reference: str, flw_status: str) -> None:
             locked.save(update_fields=['status', 'updated_at'])
     elif normalized in ('FAILED', 'CANCELLED'):
         _refund_and_fail(tx.pk, f'Transfer {normalized.lower()} by Flutterwave.')
+
+
+# ─── Reconciliation (missed transfer webhooks) ─────────────────────────────
+
+RECONCILE_MIN_AGE = timedelta(minutes=2)  # give the webhook a chance first
+_RECONCILE_MAX_PAGES = 10
+
+
+def _find_transfers_by_reference(references: set[str]) -> dict[str, dict]:
+    """Page through GET /transfers (newest first) until every reference is
+    found or the page limit is hit — for withdrawals with no stored id."""
+    found: dict[str, dict] = {}
+    for page in range(1, _RECONCILE_MAX_PAGES + 1):
+        payload = flutterwave.list_transfers(page)
+        rows = payload.get('data') or []
+        for row in rows:
+            ref = str(row.get('reference') or '')
+            if ref in references:
+                found[ref] = row
+        total_pages = ((payload.get('meta') or {}).get('page_info') or {}).get('total_pages') or page
+        if len(found) == len(references) or not rows or page >= total_pages:
+            break
+    return found
+
+
+def reconcile_pending_withdrawals(*, min_age: timedelta = RECONCILE_MIN_AGE) -> list[tuple[Transaction, str]]:
+    """Asks Flutterwave for the real status of every withdrawal still
+    pending, and applies it exactly as the transfer.completed webhook would
+    (SUCCESSFUL -> completed, FAILED/CANCELLED -> refunded + failed). A
+    transfer Flutterwave has no record of is left pending and logged for an
+    admin — never refunded automatically, since it may still have paid out.
+    Returns (transaction, status before) for each one that changed."""
+    cutoff = timezone.now() - min_age
+    pending = list(
+        Transaction.objects.filter(
+            tx_type=TransactionType.WITHDRAWAL,
+            status=TransactionStatus.PENDING,
+            created_at__lte=cutoff,
+        )
+    )
+    if not pending:
+        return []
+
+    by_reference: dict[str, dict] = {}
+    missing_ids = {tx.reference for tx in pending if not tx.flw_transfer_id}
+    if missing_ids:
+        try:
+            by_reference = _find_transfers_by_reference(missing_ids)
+        except FlutterwaveError as exc:
+            logger.warning('Withdrawal reconcile: could not list transfers: %s', exc.message)
+
+    changed = []
+    for tx in pending:
+        data = by_reference.get(tx.reference)
+        if tx.flw_transfer_id:
+            try:
+                data = (flutterwave.get_transfer(tx.flw_transfer_id).get('data')) or None
+            except FlutterwaveError as exc:
+                logger.warning('Withdrawal reconcile: could not fetch transfer %s: %s', tx.reference, exc.message)
+                continue
+        if not data:
+            logger.warning('Withdrawal reconcile: Flutterwave has no transfer for %s yet.', tx.reference)
+            continue
+
+        transfer_id = str(data.get('id') or '')
+        if transfer_id and not tx.flw_transfer_id:
+            Transaction.objects.filter(pk=tx.pk).update(flw_transfer_id=transfer_id)
+
+        flw_status = str(data.get('status') or '')
+        handle_transfer_webhook(tx.reference, flw_status)
+        tx.refresh_from_db()
+        if tx.status != TransactionStatus.PENDING:
+            logger.info('Withdrawal reconcile: %s -> %s (Flutterwave %s)', tx.reference, tx.status, flw_status)
+            changed.append((tx, TransactionStatus.PENDING))
+    return changed
 
 
 # ─── Banks / account resolution ────────────────────────────────────────────

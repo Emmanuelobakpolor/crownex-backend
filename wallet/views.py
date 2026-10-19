@@ -1,5 +1,7 @@
 """API views for the NGN wallet: deposit, withdraw, banks, and history."""
 
+import logging
+
 from django.conf import settings
 from rest_framework import permissions, status
 from rest_framework.response import Response
@@ -14,6 +16,8 @@ from .serializers import (
     WalletBalanceSerializer,
     WithdrawSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _error_response(exc: services.WalletServiceError) -> Response:
@@ -88,12 +92,22 @@ class FlutterwaveWebhookView(APIView):
     authentication_classes = []
 
     def post(self, request):
-        if request.headers.get('Verif-Hash') != settings.FLW_WEBHOOK_HASH:
-            return Response({'detail': 'Invalid signature.'}, status=401)
-
         payload = request.data
         event = payload.get('event')
         data = payload.get('data') or {}
+        logger.info(
+            'Flutterwave webhook received: event=%s reference=%s status=%s',
+            event, data.get('reference') or data.get('tx_ref'), data.get('status'),
+        )
+        if not settings.FLW_WEBHOOK_HASH:
+            logger.error('Flutterwave webhook rejected: FLW_WEBHOOK_HASH is not set.')
+            return Response({'detail': 'Webhook not configured.'}, status=503)
+        if request.headers.get('Verif-Hash') != settings.FLW_WEBHOOK_HASH:
+            logger.warning(
+                'Flutterwave webhook rejected: Verif-Hash mismatch (header present: %s)',
+                bool(request.headers.get('Verif-Hash')),
+            )
+            return Response({'detail': 'Invalid signature.'}, status=401)
 
         if event == 'charge.completed' and data.get('status') == 'successful':
             services.handle_deposit_webhook(data.get('tx_ref'))
