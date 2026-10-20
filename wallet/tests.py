@@ -103,3 +103,29 @@ class WithdrawalStatusTests(TestCase):
             )
         self.assertEqual(response.status_code, 401)
         self.assertEqual(self.status(tx), TransactionStatus.PENDING)
+
+    def test_loading_history_refreshes_own_pending_withdrawals(self):
+        from django.core.cache import cache
+        cache.clear()
+        tx = self.withdrawal('WD-1', transfer_id='777', age=timedelta(minutes=1))
+        client = APIClient()
+        client.force_authenticate(self.user)
+        with mock.patch('wallet.flutterwave.get_transfer', return_value={'data': {'id': 777, 'status': 'SUCCESSFUL'}}) as get:
+            response = client.get('/api/wallet/transactions/')
+            client.get('/api/wallet/transactions/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data[0]['status'], TransactionStatus.COMPLETED)
+        self.assertEqual(self.status(tx), TransactionStatus.COMPLETED)
+        get.assert_called_once()  # second load within the throttle window skips Flutterwave
+
+    def test_history_still_loads_when_flutterwave_is_down(self):
+        from django.core.cache import cache
+        from .flutterwave import FlutterwaveError
+        cache.clear()
+        tx = self.withdrawal('WD-1')
+        client = APIClient()
+        client.force_authenticate(self.user)
+        with mock.patch('wallet.flutterwave.list_transfers', side_effect=FlutterwaveError('down')):
+            response = client.get('/api/wallet/transactions/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.status(tx), TransactionStatus.PENDING)

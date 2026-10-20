@@ -4,6 +4,8 @@ Admin visibility (read-only) lives in adminpanel/views.py, alongside the
 rest of the admin panel's endpoints — same split as crypto/kyc.
 """
 
+import logging
+
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -17,8 +19,14 @@ from .serializers import (
     VirtualCardSerializer,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _error_response(exc: services.CardServiceError) -> Response:
+    if exc.status >= 500:
+        # Django's request log only prints "Bad Gateway: <path>"; log the
+        # provider's actual message so the cause is visible server-side.
+        logger.error('cards %s %s: %s', exc.status, exc.code, exc.message)
     return Response({'detail': exc.message, 'code': exc.code}, status=exc.status)
 
 

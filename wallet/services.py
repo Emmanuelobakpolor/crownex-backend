@@ -13,6 +13,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
@@ -316,21 +317,25 @@ def _find_transfers_by_reference(references: set[str]) -> dict[str, dict]:
     return found
 
 
-def reconcile_pending_withdrawals(*, min_age: timedelta = RECONCILE_MIN_AGE) -> list[tuple[Transaction, str]]:
+def reconcile_pending_withdrawals(
+    *, min_age: timedelta = RECONCILE_MIN_AGE, user=None
+) -> list[tuple[Transaction, str]]:
     """Asks Flutterwave for the real status of every withdrawal still
-    pending, and applies it exactly as the transfer.completed webhook would
-    (SUCCESSFUL -> completed, FAILED/CANCELLED -> refunded + failed). A
+    pending (optionally just one user's), and applies it exactly as the
+    transfer.completed webhook would (SUCCESSFUL -> completed,
+    FAILED/CANCELLED -> refunded + failed). A
     transfer Flutterwave has no record of is left pending and logged for an
     admin — never refunded automatically, since it may still have paid out.
     Returns (transaction, status before) for each one that changed."""
     cutoff = timezone.now() - min_age
-    pending = list(
-        Transaction.objects.filter(
-            tx_type=TransactionType.WITHDRAWAL,
-            status=TransactionStatus.PENDING,
-            created_at__lte=cutoff,
-        )
+    qs = Transaction.objects.filter(
+        tx_type=TransactionType.WITHDRAWAL,
+        status=TransactionStatus.PENDING,
+        created_at__lte=cutoff,
     )
+    if user is not None:
+        qs = qs.filter(user=user)
+    pending = list(qs)
     if not pending:
         return []
 
@@ -404,5 +409,24 @@ def resolve_account_name(account_number: str, bank_code: str) -> str:
     return account_name
 
 
+_USER_RECONCILE_MIN_AGE = timedelta(seconds=30)
+_USER_RECONCILE_THROTTLE = 30  # seconds between Flutterwave checks per user
+
+
+def refresh_pending_withdrawals(user) -> None:
+    """Checks this user's pending withdrawals against Flutterwave when they
+    load their history, so a missed webhook (or a stopped worker) doesn't
+    leave a paid-out withdrawal showing "pending". Throttled per user and
+    never raises — a Flutterwave outage must not break the history list."""
+    cache_key = f'wallet:withdrawal-refresh:{user.pk}'
+    if not cache.add(cache_key, 1, _USER_RECONCILE_THROTTLE):
+        return
+    try:
+        reconcile_pending_withdrawals(min_age=_USER_RECONCILE_MIN_AGE, user=user)
+    except Exception:
+        logger.exception('Withdrawal refresh failed for user %s', user.pk)
+
+
 def list_transactions(user):
+    refresh_pending_withdrawals(user)
     return Transaction.objects.filter(user=user).order_by('-created_at')[:50]

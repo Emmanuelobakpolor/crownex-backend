@@ -211,6 +211,11 @@ LOGGING = {
             'level': 'INFO',
             'propagate': False,
         },
+        'wallet': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
         'django.request': {
             'handlers': ['console'],
             'level': 'ERROR',
