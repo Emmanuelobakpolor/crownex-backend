@@ -64,10 +64,14 @@ def _login() -> str:
         ) from exc
 
     if not response.ok:
-        raise ReloadlyError(
+        detail = (
             payload.get('error_description')
             or payload.get('message')
-            or f'Reloadly auth failed ({response.status_code}).',
+            or 'no message'
+        )
+        raise ReloadlyError(
+            f'Reloadly auth failed ({response.status_code}, '
+            f'audience={_base_url()}): {detail}',
             payload,
         )
 
@@ -130,7 +134,7 @@ def _request(method: str, path: str, **kwargs):
     if not response.ok:
         message = payload.get('errorMessage') or payload.get('message') if isinstance(payload, dict) else None
         raise ReloadlyError(
-            message or f'Reloadly returned {response.status_code}.',
+            f'{method} {path} returned {response.status_code}: {message or "no message"}',
             payload if isinstance(payload, dict) else {},
         )
 
