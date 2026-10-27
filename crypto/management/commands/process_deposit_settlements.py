@@ -21,6 +21,7 @@ from django.db import close_old_connections
 from crypto import orders, settlements
 from crypto.models import CryptoDepositSettlement, SettlementStatus
 from crypto.services import CryptoServiceError
+from giftcards.services import reconcile_pending_purchases
 from wallet.services import reconcile_pending_withdrawals
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,13 @@ class Command(BaseCommand):
                         self.stdout.write(f'Withdrawal {tx.reference}: {before} -> {tx.status}')
                 except Exception:
                     logger.exception('withdrawal_reconcile_error')
+                # Gift card orders whose code arrived after POST /orders.
+                try:
+                    for purchase, before in reconcile_pending_purchases():
+                        if purchase.status != before:
+                            self.stdout.write(f'Gift card {purchase.reference}: {before} -> {purchase.status}')
+                except Exception:
+                    logger.exception('giftcard_reconcile_error')
             if not options['loop']:
                 return
             time.sleep(options['interval'])

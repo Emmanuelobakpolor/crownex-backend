@@ -59,8 +59,9 @@ class Command(BaseCommand):
         except ReloadlyError as exc:
             self.stdout.write(self.style.ERROR(f'  get_order failed: {exc.message}'))
             self._dump('payload', exc.payload)
-            return
-        self._dump('order', order)
+            order = {'transactionId': purchase.reloadly_tx_id}
+        else:
+            self._dump('order', order)
 
         try:
             cards = reloadly.get_redeem_codes(purchase.reloadly_tx_id)

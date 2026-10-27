@@ -171,10 +171,10 @@ def create_order(
 
 
 def get_order(transaction_id) -> dict:
-    """GET /orders/transactions/{transactionId} — the authoritative order
-    record, used to fetch the redeemed card for brands that fulfil after
-    the initial POST /orders response (see the webhook handler)."""
-    return _request('GET', f'/orders/transactions/{transaction_id}')
+    """GET /reports/transactions/{transactionId} — the authoritative order
+    record (status, product). Reloadly has no GET /orders/transactions/{id};
+    that path 404s. Card codes come from get_redeem_codes instead."""
+    return _request('GET', f'/reports/transactions/{transaction_id}')
 
 
 def get_redeem_codes(transaction_id) -> list[dict]:

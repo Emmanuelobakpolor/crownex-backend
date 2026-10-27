@@ -311,7 +311,7 @@ def handle_webhook(payload: dict) -> None:
     field names against that before relying on this in production). What
     is documented is that it's keyed on the customIdentifier you sent when
     creating the order, so that's used to find the purchase; the actual
-    card details are always re-fetched from GET /orders/transactions/{id}
+    card details are always re-fetched from Reloadly (get_order + /cards)
     rather than trusted off the webhook body itself, same principle as
     never trusting a client-supplied price.
     """
@@ -342,21 +342,41 @@ def handle_webhook(payload: dict) -> None:
 _REFRESH_BATCH = 5
 
 
+def _requery(purchases) -> list[tuple[GiftCardPurchase, str]]:
+    """Re-check PENDING purchases against Reloadly. Returns (purchase,
+    status_before) for each one checked."""
+    checked = []
+    for purchase in purchases:
+        try:
+            order = reloadly.get_order(purchase.reloadly_tx_id)
+        except ReloadlyError as exc:
+            # Status lookup failing mustn't block the card fetch — the
+            # /cards endpoint alone is enough to complete the purchase.
+            logger.warning('giftcards: requery %s failed: %s', purchase.reference, exc.message)
+            order = {'transactionId': purchase.reloadly_tx_id}
+        checked.append((_apply_order_result(purchase, order), purchase.status))
+    return checked
+
+
 def refresh_pending_purchases(user) -> None:
     """Re-check this user's PENDING purchases against Reloadly — covers
     brands that fulfil a little after POST /orders and a webhook that
     never arrives. Bounded so the history request stays fast."""
-    pending = GiftCardPurchase.objects.filter(
-        user=user, status=GiftCardStatus.PENDING
-    ).exclude(reloadly_tx_id='').order_by('-created_at')[:_REFRESH_BATCH]
+    _requery(
+        GiftCardPurchase.objects.filter(user=user, status=GiftCardStatus.PENDING)
+        .exclude(reloadly_tx_id='')
+        .order_by('-created_at')[:_REFRESH_BATCH]
+    )
 
-    for purchase in pending:
-        try:
-            order = reloadly.get_order(purchase.reloadly_tx_id)
-        except ReloadlyError as exc:
-            logger.warning('giftcards: requery %s failed: %s', purchase.reference, exc.message)
-            continue
-        _apply_order_result(purchase, order)
+
+def reconcile_pending_purchases(limit: int = 50) -> list[tuple[GiftCardPurchase, str]]:
+    """Every user's PENDING purchases — run by the settlement worker so
+    they resolve without the buyer having to open the app."""
+    return _requery(
+        GiftCardPurchase.objects.filter(status=GiftCardStatus.PENDING)
+        .exclude(reloadly_tx_id='')
+        .order_by('created_at')[:limit]
+    )
 
 
 def list_purchases(user):
