@@ -15,7 +15,9 @@ before anything is debited.
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
+from urllib.parse import quote
 
 from django.conf import settings
 from django.core.cache import cache
@@ -26,6 +28,8 @@ from wallet.services import WalletServiceError, credit_wallet, debit_wallet
 from . import reloadly
 from .models import GiftCardPurchase, GiftCardStatus, generate_giftcard_reference
 from .reloadly import ReloadlyError
+
+logger = logging.getLogger(__name__)
 
 _PRODUCTS_CACHE_TTL = 300  # seconds
 
@@ -54,7 +58,8 @@ def get_rate() -> Decimal:
 
 
 def _products_page(country_code: str, product_name: str | None = None) -> list[dict]:
-    cache_key = f'giftcards:reloadly:products:{country_code}:{product_name or "*"}'
+    # Brand names contain spaces/&; quote them so the key is memcached-safe.
+    cache_key = f'giftcards:reloadly:products:{country_code}:{quote(product_name or "*", safe="")}'
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
@@ -184,19 +189,41 @@ def _refund_and_fail(purchase_id, note: str) -> None:
         purchase.save(update_fields=['status', 'note', 'updated_at'])
 
 
+_FAILED_ORDER_STATUSES = ('FAILED', 'REFUNDED', 'REJECTED', 'CANCELLED', 'ERROR')
+
+
+def _fetch_redeem_cards(transaction_id) -> list[dict]:
+    """Card number/PIN only come from GET /orders/transactions/{id}/cards —
+    never from the order payload itself. An order that's still being
+    fulfilled makes this error; that just means "not yet"."""
+    if not transaction_id:
+        return []
+    try:
+        return reloadly.get_redeem_codes(transaction_id)
+    except ReloadlyError as exc:
+        logger.info('giftcards: redeem codes not ready for %s: %s', transaction_id, exc.message)
+        return []
+
+
 def _apply_order_result(purchase: GiftCardPurchase, payload: dict) -> GiftCardPurchase:
     """Reconcile an order-creation response or a webhook/requery payload.
     Idempotent — a purchase only ever leaves PENDING once, here.
 
-    Reloadly's POST /orders response has the redeemed card straight away
-    for most brands. A few brands fulfil asynchronously — no redeemedCards
-    yet, order still PENDING — and only get their code later via the
-    webhook (see handle_webhook), so this only marks COMPLETED once a
-    redeemed card actually shows up in the payload.
+    Marks COMPLETED once a redeemed card is available, FAILED (with a
+    refund) if Reloadly reports the order failed/refunded, and otherwise
+    leaves it PENDING for the webhook or refresh_pending_purchases.
     """
     transaction_id = payload.get('transactionId')
     product = payload.get('product') or {}
+    order_status = str(payload.get('status', '')).upper()
+
+    if order_status in _FAILED_ORDER_STATUSES:
+        _refund_and_fail(purchase.pk, f'Order {order_status.lower()} at provider.')
+        return GiftCardPurchase.objects.get(pk=purchase.pk)
+
     redeemed_cards = payload.get('redeemedCards') or payload.get('cards') or []
+    if not redeemed_cards:
+        redeemed_cards = _fetch_redeem_cards(transaction_id or purchase.reloadly_tx_id)
 
     with transaction.atomic():
         locked = GiftCardPurchase.objects.select_for_update().get(pk=purchase.pk)
@@ -233,23 +260,26 @@ def buy_gift_card(
     rate = get_rate()
     amount_ngn = (usd * rate).quantize(Decimal('0.01'))
 
-    try:
-        debit_wallet(user, amount_ngn)
-    except WalletServiceError as exc:
-        raise GiftCardServiceError(exc.message, code=exc.code, status=exc.status)
-
     reference = generate_giftcard_reference()
-    purchase = GiftCardPurchase.objects.create(
-        user=user,
-        brand=brand,
-        country_code=country_code,
-        product_id=product_id,
-        unit_price_usd=usd,
-        rate_ngn=rate,
-        amount_ngn=amount_ngn,
-        reference=reference,
-        status=GiftCardStatus.PENDING,
-    )
+    # Debit and record together, so a debit can never exist without a
+    # purchase row the user (and support) can see.
+    with transaction.atomic():
+        try:
+            debit_wallet(user, amount_ngn)
+        except WalletServiceError as exc:
+            raise GiftCardServiceError(exc.message, code=exc.code, status=exc.status)
+
+        purchase = GiftCardPurchase.objects.create(
+            user=user,
+            brand=brand,
+            country_code=country_code,
+            product_id=product_id,
+            unit_price_usd=usd,
+            rate_ngn=rate,
+            amount_ngn=amount_ngn,
+            reference=reference,
+            status=GiftCardStatus.PENDING,
+        )
 
     try:
         payload = reloadly.create_order(
@@ -309,5 +339,26 @@ def handle_webhook(payload: dict) -> None:
     _apply_order_result(purchase, order)
 
 
+_REFRESH_BATCH = 5
+
+
+def refresh_pending_purchases(user) -> None:
+    """Re-check this user's PENDING purchases against Reloadly — covers
+    brands that fulfil a little after POST /orders and a webhook that
+    never arrives. Bounded so the history request stays fast."""
+    pending = GiftCardPurchase.objects.filter(
+        user=user, status=GiftCardStatus.PENDING
+    ).exclude(reloadly_tx_id='').order_by('-created_at')[:_REFRESH_BATCH]
+
+    for purchase in pending:
+        try:
+            order = reloadly.get_order(purchase.reloadly_tx_id)
+        except ReloadlyError as exc:
+            logger.warning('giftcards: requery %s failed: %s', purchase.reference, exc.message)
+            continue
+        _apply_order_result(purchase, order)
+
+
 def list_purchases(user):
+    refresh_pending_purchases(user)
     return GiftCardPurchase.objects.filter(user=user).order_by('-created_at')[:50]

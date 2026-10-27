@@ -327,9 +327,15 @@ PLUGINNG_WEBHOOK_SECRET = os.environ.get('PLUGINNG_WEBHOOK_SECRET', '')
 # Google Play, etc. Auth is OAuth2 client_credentials (see
 # giftcards/reloadly.py); RELOADLY_NGN_PER_USD is our own app-controlled
 # FX rate, not something Reloadly provides.
-RELOADLY_CLIENT_ID = os.environ.get('RELOADLY_CLIENT_ID', '')
-RELOADLY_CLIENT_SECRET = os.environ.get('RELOADLY_CLIENT_SECRET', '')
-RELOADLY_SANDBOX = os.environ.get('RELOADLY_SANDBOX', 'true').lower() == 'true'
+# Strip stray whitespace/quotes pasted into dashboard variables — a
+# trailing space on RELOADLY_SANDBOX would otherwise silently flip us to
+# the live host, and Reloadly answers mismatched credentials with a bare
+# 401 "Access Denied".
+RELOADLY_CLIENT_ID = os.environ.get('RELOADLY_CLIENT_ID', '').strip().strip('"\'')
+RELOADLY_CLIENT_SECRET = os.environ.get('RELOADLY_CLIENT_SECRET', '').strip().strip('"\'')
+RELOADLY_SANDBOX = (
+    os.environ.get('RELOADLY_SANDBOX', 'true').strip().strip('"\'').lower() == 'true'
+)
 try:
     # Railway variables set to blank still exist as '', which Decimal('')
     # can't parse — fall back to the default instead of crashing startup.

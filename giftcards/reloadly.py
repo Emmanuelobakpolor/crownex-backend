@@ -175,3 +175,14 @@ def get_order(transaction_id) -> dict:
     record, used to fetch the redeemed card for brands that fulfil after
     the initial POST /orders response (see the webhook handler)."""
     return _request('GET', f'/orders/transactions/{transaction_id}')
+
+
+def get_redeem_codes(transaction_id) -> list[dict]:
+    """GET /orders/transactions/{transactionId}/cards — the card number /
+    PIN for a placed order. Reloadly never includes these in the POST
+    /orders or GET /orders/transactions/{id} responses; this is the only
+    endpoint that returns them."""
+    payload = _request('GET', f'/orders/transactions/{transaction_id}/cards')
+    if isinstance(payload, dict):
+        payload = payload.get('content') or payload.get('cards') or []
+    return payload or []
