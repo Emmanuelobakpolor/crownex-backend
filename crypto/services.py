@@ -102,23 +102,14 @@ COIN_NETWORKS: dict[str, tuple[str, ...]] = {
 }
 
 
-# Networks a withdrawal can go out on, per coin, named as in the Networks
-# column of Quidax's supported-cryptocurrencies table (uppercased here,
-# lowercased on the way to Quidax). Quidax refuses a blockchain withdrawal
-# that names no network ("Network is required"), so every withdrawable coin
-# needs at least one. The first entry is the default for a client that
-# sends none — except the stablecoins, where guessing the chain loses funds.
-WITHDRAW_NETWORKS: dict[str, tuple[str, ...]] = {
-    'btc': ('BTC',),
-    'eth': ('ERC20', 'BEP20'),
-    'usdt': COIN_NETWORKS['usdt'],
-    'usdc': COIN_NETWORKS['usdc'],
-    'sol': ('BEP20',),  # Quidax lists SOL on bep20 only — not native Solana
-    'xrp': ('RIPPLE',),
-    'ltc': ('LTC',),
-    'trx': ('TRC20',),
-    'dash': ('DASH',),
-}
+# Withdrawal networks come live from Quidax's wallet list: each wallet's
+# networks[] carries withdraws_enabled, per account, and Quidax switches
+# chains off on its own (a fixed list went stale — "Withdrawal is not
+# allowed for currency: btc with network: btc"). Quidax also refuses a
+# blockchain withdrawal that names no network, so one is always sent.
+# Codes are uppercased here and lowercased on the way back to Quidax.
+_WITHDRAW_NETWORKS_CACHE_KEY = 'crypto:quidax:withdraw_networks'
+_WITHDRAW_NETWORKS_CACHE_TTL = 60  # seconds
 
 NETWORK_LABELS: dict[str, str] = {
     'BTC': 'Bitcoin',
@@ -126,34 +117,71 @@ NETWORK_LABELS: dict[str, str] = {
     'BEP20': 'BEP20 (BNB Smart Chain)',
     'TRC20': 'TRC20 (Tron)',
     'POLYGON': 'Polygon',
+    'SOLANA': 'Solana',
     'RIPPLE': 'XRP Ledger',
     'LTC': 'Litecoin',
     'DASH': 'Dash',
 }
 
 
+def _live_withdraw_networks() -> dict[str, list[dict]]:
+    """coin -> [{code, label}] Quidax lets the account withdraw on right
+    now, its default network first."""
+    cached = cache.get(_WITHDRAW_NETWORKS_CACHE_KEY)
+    if cached is not None:
+        return cached
+    try:
+        wallets = quidax.list_wallets(settings.QUIDAX_USER_ID)
+    except QuidaxError as exc:
+        raise CryptoServiceError(
+            f'Could not load withdrawal networks: {exc.message}', code='quidax_unreachable', status=502
+        )
+
+    by_coin: dict[str, list[dict]] = {}
+    for wallet in wallets:
+        if not isinstance(wallet, dict):
+            continue
+        default = str(wallet.get('default_network') or '').upper()
+        networks = []
+        for row in wallet.get('networks') or []:
+            code = str(row.get('id') or '').upper() if isinstance(row, dict) else ''
+            if code and row.get('withdraws_enabled'):
+                networks.append({'code': code, 'label': NETWORK_LABELS.get(code) or str(row.get('name') or code)})
+        networks.sort(key=lambda n: n['code'] != default)
+        by_coin[str(wallet.get('currency') or '').lower()] = networks
+    cache.set(_WITHDRAW_NETWORKS_CACHE_KEY, by_coin, _WITHDRAW_NETWORKS_CACHE_TTL)
+    return by_coin
+
+
+def forget_withdraw_networks() -> None:
+    """Drop the cached list — Quidax just refused a network it listed."""
+    cache.delete(_WITHDRAW_NETWORKS_CACHE_KEY)
+
+
 def withdraw_networks(coin: str) -> list[dict]:
-    return [{'code': n, 'label': NETWORK_LABELS.get(n, n)} for n in WITHDRAW_NETWORKS.get(coin, ())]
+    return _live_withdraw_networks().get(coin, [])
 
 
 def validate_withdraw_network(coin: str, network: str | None) -> str:
-    """Normalised (uppercase) withdrawal network. Every withdrawable coin
-    has one — see WITHDRAW_NETWORKS."""
-    allowed = WITHDRAW_NETWORKS.get(coin)
+    """Normalised (uppercase) withdrawal network, one Quidax currently
+    allows. A client that sends none gets the coin's only network, or its
+    default one — except a stablecoin, where guessing the chain loses funds."""
+    allowed = [n['code'] for n in withdraw_networks(coin)]
     if not allowed:
         raise CryptoServiceError(
-            f'{coin.upper()} withdrawals are not available yet.', code='withdraw_not_supported'
+            f'Sending {coin.upper()} is temporarily unavailable. Please try again later.',
+            code='withdraw_unavailable',
         )
     network_key = (network or '').upper()
     if not network_key:
-        if coin in COIN_NETWORKS:
+        if coin in COIN_NETWORKS and len(allowed) > 1:
             raise CryptoServiceError(
                 f'Select a network for {coin.upper()}: {", ".join(allowed)}.', code='network_required'
             )
         return allowed[0]
     if network_key not in allowed:
         raise CryptoServiceError(
-            f'{coin.upper()} can be sent on {", ".join(allowed)} only.', code='unsupported_network'
+            f'{coin.upper()} can only be sent on {", ".join(allowed)} right now.', code='unsupported_network'
         )
     return network_key
 

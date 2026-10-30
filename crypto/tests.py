@@ -1278,16 +1278,54 @@ class NetworkValidationTests(TestCase):
                 get_deposit_address(user, 'usdc', network='TRC20')
 
 
+
+def _quidax_wallet(currency, default, *networks):
+    """A wallet row as GET /users/me/wallets returns it; networks are
+    (id, withdraws_enabled) pairs."""
+    return {
+        'currency': currency,
+        'default_network': default,
+        'networks': [
+            {'id': nid, 'name': nid.title(), 'deposits_enabled': True, 'withdraws_enabled': enabled}
+            for nid, enabled in networks
+        ],
+    }
+
+
+QUIDAX_WALLETS = [
+    # As on the live account: native BTC withdrawals switched off, BEP20 open.
+    _quidax_wallet('btc', 'btc', ('btc', False), ('bep20', True)),
+    _quidax_wallet('eth', 'erc20', ('bep20', True), ('erc20', True)),
+    _quidax_wallet('usdt', 'bep20', ('bep20', True), ('erc20', True), ('trc20', True), ('polygon', False)),
+    _quidax_wallet('sol', 'solana', ('solana', True), ('bep20', False)),
+    _quidax_wallet('xrp', 'ripple', ('ripple', True)),
+    _quidax_wallet('trx', 'trc20', ('trc20', True)),
+    _quidax_wallet('ltc', 'ltc', ('ltc', False)),
+]
+
+EVM = '0x' + 'a' * 40
+TRON = 'T' + 'a' * 33
+BTC_ADDRESS = 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq'
+
+
 @override_settings(QUIDAX_SECRET_KEY='', QUIDAX_USER_ID='me', CRYPTO_WITHDRAW_DAILY_LIMIT_NGN=Decimal('100000'))
 class WithdrawalNetworkTests(TestCase):
-    """Quidax refuses a blockchain withdrawal that names no network, so every
-    withdrawal must carry one — the coin's own when it has only one."""
+    """Quidax refuses a blockchain withdrawal that names no network, or one
+    whose withdrawals it has switched off — so networks come from its live
+    wallet list, never a fixed table."""
 
     def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.addCleanup(cache.clear)
         self.sent: list[dict] = []
+        self.withdraw_errors: list[Exception] = []
+        self.wallets = list(QUIDAX_WALLETS)
         patches = [
             mock.patch('crypto.quidax.requests.request', side_effect=AssertionError('real Quidax call')),
             mock.patch('crypto.quidax.create_withdrawal', side_effect=self._create_withdrawal),
+            mock.patch('crypto.quidax.list_wallets', side_effect=lambda user_id: self.wallets),
             mock.patch('crypto.withdrawals.get_coin_rate_ngn', return_value=Decimal('50000')),
         ]
         for p in patches:
@@ -1299,6 +1337,8 @@ class WithdrawalNetworkTests(TestCase):
 
     def _create_withdrawal(self, **kw):
         self.sent.append(kw)
+        if self.withdraw_errors:
+            raise self.withdraw_errors.pop(0)
         return {'data': {'id': f'qw-{len(self.sent)}'}}
 
     def _withdraw(self, coin, address, network=None, amount='1'):
@@ -1309,37 +1349,64 @@ class WithdrawalNetworkTests(TestCase):
             self.user, coin=coin, amount=Decimal(amount), address=address, pin='1234', network=network
         )
 
-    def test_single_network_coin_sends_its_network_lowercase(self):
-        w = self._withdraw('btc', 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq')
-        self.assertEqual(w.network, 'BTC')
-        self.assertEqual(self.sent[0]['network'], 'btc')
+    def test_only_networks_quidax_allows_are_offered_default_first(self):
+        from .services import withdraw_networks
 
-    def test_native_network_names_follow_quidax(self):
-        self._withdraw('trx', 'T' + 'a' * 33)
-        self._withdraw('xrp', 'rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH')
-        self.assertEqual([s['network'] for s in self.sent], ['trc20', 'ripple'])
+        self.assertEqual([n['code'] for n in withdraw_networks('btc')], ['BEP20'])
+        self.assertEqual([n['code'] for n in withdraw_networks('eth')], ['ERC20', 'BEP20'])
+        self.assertEqual([n['code'] for n in withdraw_networks('usdt')], ['BEP20', 'ERC20', 'TRC20'])
+        self.assertEqual(withdraw_networks('ltc'), [])
 
-    def test_eth_defaults_to_erc20_and_accepts_bep20(self):
-        self._withdraw('eth', '0x' + 'a' * 40)
-        self._withdraw('eth', '0x' + 'a' * 40, network='bep20')
-        self.assertEqual([s['network'] for s in self.sent], ['erc20', 'bep20'])
+    def test_disabled_network_is_refused_before_quidax(self):
+        with self.assertRaises(CryptoServiceError) as ctx:
+            self._withdraw('btc', BTC_ADDRESS, network='btc')
+        self.assertEqual(ctx.exception.code, 'unsupported_network')
+        self.assertEqual(self.sent, [])
+
+    def test_btc_goes_out_on_the_open_network_to_a_matching_address(self):
+        with self.assertRaises(CryptoServiceError) as ctx:
+            self._withdraw('btc', BTC_ADDRESS)  # a native address can't receive BEP20
+        self.assertEqual(ctx.exception.code, 'invalid_address')
+
+        w = self._withdraw('btc', EVM)
+        self.assertEqual(w.network, 'BEP20')
+        self.assertEqual(self.sent[0]['network'], 'bep20')
+
+    def test_native_networks_are_sent_lowercase(self):
+        self._withdraw('trx', TRON, amount='0.1')
+        self._withdraw('xrp', 'rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH', amount='0.1')
+        self._withdraw('sol', '7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV', amount='0.1')
+        self.assertEqual([s['network'] for s in self.sent], ['trc20', 'ripple', 'solana'])
+
+    def test_coin_with_every_network_off_is_unavailable(self):
+        with self.assertRaises(CryptoServiceError) as ctx:
+            self._withdraw('ltc', 'ltc1qg82x8xqx4l8qkv0hn9wgvfgdpx9lvlw2wlmjs3')
+        self.assertEqual(ctx.exception.code, 'withdraw_unavailable')
 
     def test_stablecoin_without_network_is_refused_before_quidax(self):
         with self.assertRaises(CryptoServiceError) as ctx:
-            self._withdraw('usdt', 'T' + 'a' * 33)
+            self._withdraw('usdt', TRON)
         self.assertEqual(ctx.exception.code, 'network_required')
         self.assertEqual(self.sent, [])
 
-    def test_usdt_trc20_is_sent_lowercase(self):
-        self._withdraw('usdt', 'T' + 'a' * 33, network='TRC20')
-        self.assertEqual(self.sent[0]['network'], 'trc20')
+    def test_quidax_refusal_returns_funds_and_refreshes_networks(self):
+        self.withdraw_errors.append(
+            QuidaxError('Withdrawal is not allowed for currency: eth with network: erc20', status_code=400)
+        )
+        w = self._withdraw('eth', EVM, network='ERC20')
+        self.assertEqual(w.status, 'failed')
+        self.assertEqual(
+            w.note, 'Sending ETH on ERC20 is temporarily unavailable. Your ETH has been returned to your balance.'
+        )
+        self.assertEqual(CryptoWallet.objects.get(user=self.user, coin='eth').available, Decimal('5'))
 
-    def test_unsupported_network_is_refused(self):
+        # Quidax's list now shows it off — the next request sees that, not the cached copy.
+        self.wallets = [_quidax_wallet('eth', 'erc20', ('bep20', True), ('erc20', False))]
         with self.assertRaises(CryptoServiceError) as ctx:
-            self._withdraw('btc', 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq', network='bep20')
+            self._withdraw('eth', EVM, network='ERC20')
         self.assertEqual(ctx.exception.code, 'unsupported_network')
 
-    def test_options_show_balance_conversions_and_limits(self):
+    def test_options_show_balance_conversions_limits_and_networks(self):
         from .withdrawals import withdraw_options
 
         CryptoWallet.objects.create(user=self.user, coin='btc', available=Decimal('3'))
@@ -1353,14 +1420,16 @@ class WithdrawalNetworkTests(TestCase):
             options = withdraw_options(self.user)
 
         btc = next(c for c in options['coins'] if c['coin'] == 'btc')
-        self.assertEqual(btc['networks'], [{'code': 'BTC', 'label': 'Bitcoin'}])
+        self.assertEqual(btc['networks'], [{'code': 'BEP20', 'label': 'BEP20 (BNB Smart Chain)'}])
         self.assertEqual(btc['available_ngn'], '150000.00')
         self.assertEqual(btc['available_usd'], '93.75')
         self.assertEqual(btc['rate_usd'], '31.25')
         self.assertEqual(Decimal(btc['min_amount']), Decimal('0.02'))  # ₦1,000 / ₦50,000
         self.assertEqual(Decimal(btc['max_amount']), Decimal('2'))  # ₦100,000 daily limit, below the 3 BTC held
         self.assertEqual(options['daily_remaining_ngn'], '100000.00')
+
+        ltc = next(c for c in options['coins'] if c['coin'] == 'ltc')
+        self.assertEqual(ltc['networks'], [])  # listed, but nothing to send it on
         eth = next(c for c in options['coins'] if c['coin'] == 'eth')  # no ethngn price
-        self.assertEqual(eth['available'], '0')
         self.assertIsNone(eth['rate_ngn'])
         self.assertIsNone(eth['max_amount'])

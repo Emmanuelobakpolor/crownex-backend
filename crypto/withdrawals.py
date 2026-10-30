@@ -39,6 +39,7 @@ from .services import (
     compute_fee_ngn,
     credit_crypto_available,
     debit_reserved_crypto,
+    forget_withdraw_networks,
     get_coin_rate_ngn,
     get_usd_rate_ngn,
     release_reserved_crypto,
@@ -54,6 +55,17 @@ from .services import (
 # on that backstop instead of risking a wrong regex blocking a real address.
 _EVM_ADDRESS = re.compile(r'^0x[a-fA-F0-9]{40}$')
 _TRON_ADDRESS = re.compile(r'^T[a-zA-Z0-9]{33}$')
+_SOLANA_ADDRESS = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
+
+# A coin sent over another chain (BTC on BEP20, SOL on BEP20, ...) goes to
+# that chain's address, whatever the coin's own address looks like.
+_NETWORK_ADDRESS_PATTERNS: dict[str, re.Pattern] = {
+    'ERC20': _EVM_ADDRESS,
+    'BEP20': _EVM_ADDRESS,
+    'POLYGON': _EVM_ADDRESS,
+    'TRC20': _TRON_ADDRESS,
+    'SOLANA': _SOLANA_ADDRESS,
+}
 
 _ADDRESS_PATTERNS: dict[tuple[str, str], re.Pattern] = {
     ('btc', ''): re.compile(r'^(bc1[a-z0-9]{25,59}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$'),
@@ -64,8 +76,7 @@ _ADDRESS_PATTERNS: dict[tuple[str, str], re.Pattern] = {
     ('usdc', 'ERC20'): _EVM_ADDRESS,
     ('usdc', 'BEP20'): _EVM_ADDRESS,
     ('usdc', 'POLYGON'): _EVM_ADDRESS,
-    ('sol', 'BEP20'): _EVM_ADDRESS,
-    ('sol', ''): re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$'),
+    ('sol', ''): _SOLANA_ADDRESS,
     ('trx', ''): _TRON_ADDRESS,
     ('ltc', ''): re.compile(r'^(ltc1[a-z0-9]{25,59}|[LM3][a-km-zA-HJ-NP-Z1-9]{25,34})$'),
     ('dash', ''): re.compile(r'^X[a-km-zA-HJ-NP-Z1-9]{33}$'),
@@ -90,7 +101,12 @@ _ADDRESS_PATTERNS: dict[tuple[str, str], re.Pattern] = {
 
 
 def _validate_address(coin: str, network: str, address: str) -> None:
-    pattern = _ADDRESS_PATTERNS.get((coin, network.upper())) or _ADDRESS_PATTERNS.get((coin, ''))
+    network = network.upper()
+    pattern = (
+        _ADDRESS_PATTERNS.get((coin, network))
+        or _NETWORK_ADDRESS_PATTERNS.get(network)
+        or _ADDRESS_PATTERNS.get((coin, ''))
+    )
     if pattern and not pattern.match(address.strip()):
         raise CryptoServiceError(
             'This does not look like a valid address for this network.', code='invalid_address'
@@ -162,6 +178,15 @@ def _create_withdrawal_row(
     raise CryptoServiceError('Could not generate a withdrawal reference.', status=500)
 
 
+def _failure_note(withdrawal: CryptoWithdrawal, quidax_message: str) -> str:
+    """What the user reads when Quidax refuses — the raw reason stays in the log."""
+    coin = withdrawal.coin.upper()
+    returned = f'Your {coin} has been returned to your balance.'
+    if 'not allowed' in quidax_message.lower():
+        return f'Sending {coin} on {withdrawal.network} is temporarily unavailable. {returned}'
+    return f'Withdrawal failed: {quidax_message}. {returned}'
+
+
 def _execute_quidax_withdrawal(withdrawal: CryptoWithdrawal) -> CryptoWithdrawal:
     volume = _withdrawal_volume(withdrawal)
 
@@ -176,6 +201,7 @@ def _execute_quidax_withdrawal(withdrawal: CryptoWithdrawal) -> CryptoWithdrawal
         )
     except QuidaxError as exc:
         _log(withdrawal, 'quidax_error', f'Withdrawal request failed: {exc.message}')
+        forget_withdraw_networks()  # it may have just switched this network off
         release_reserved_crypto(withdrawal.user, withdrawal.coin, withdrawal.amount)
         _log(
             withdrawal,
@@ -187,7 +213,7 @@ def _execute_quidax_withdrawal(withdrawal: CryptoWithdrawal) -> CryptoWithdrawal
             if locked.status != WithdrawalStatus.PROCESSING:
                 return locked
             locked.status = WithdrawalStatus.FAILED
-            locked.note = f'Quidax withdrawal failed: {exc.message}'
+            locked.note = _failure_note(locked, exc.message)
             locked.save(update_fields=['status', 'note', 'updated_at'])
         withdrawal.refresh_from_db()
         return withdrawal
@@ -267,7 +293,7 @@ def withdraw_options(user) -> dict:
 
     rows = []
     for coin, meta in all_coins().items():
-        if not coin_capabilities(coin)['withdraw'] or not withdraw_networks(coin):
+        if not coin_capabilities(coin)['withdraw']:
             continue
         available = balances.get(coin, Decimal('0'))
         rate = _resolve_rate(tickers, coin)
