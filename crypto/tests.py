@@ -1396,7 +1396,8 @@ class WithdrawalNetworkTests(TestCase):
         w = self._withdraw('eth', EVM, network='ERC20')
         self.assertEqual(w.status, 'failed')
         self.assertEqual(
-            w.note, 'Sending ETH on ERC20 is temporarily unavailable. Your ETH has been returned to your balance.'
+            w.note,
+            'Sending ETH on ERC20 (Ethereum) is temporarily unavailable. Your ETH has been returned to your balance.',
         )
         self.assertEqual(CryptoWallet.objects.get(user=self.user, coin='eth').available, Decimal('5'))
 
@@ -1405,6 +1406,46 @@ class WithdrawalNetworkTests(TestCase):
         with self.assertRaises(CryptoServiceError) as ctx:
             self._withdraw('eth', EVM, network='ERC20')
         self.assertEqual(ctx.exception.code, 'unsupported_network')
+
+    def test_quidax_minimum_is_learned_from_a_refusal(self):
+        from .models import CryptoWithdrawMinimum
+
+        self.withdraw_errors.append(
+            QuidaxError('Token withdrawal lower than the minimum withdrawal limit', status_code=400)
+        )
+        w = self._withdraw('trx', TRON, amount='0.1')
+        self.assertEqual(w.status, 'failed')
+        self.assertEqual(
+            w.note,
+            '0.1 TRX is below the minimum Quidax allows on TRC20 (Tron). '
+            'Please send a larger amount. Your TRX has been returned to your balance.',
+        )
+        self.assertEqual(CryptoWithdrawMinimum.objects.get(coin='trx', network='TRC20').refused_below, Decimal('0.1'))
+
+        # The same amount is now stopped here instead of going back to Quidax.
+        with self.assertRaises(CryptoServiceError) as ctx:
+            self._withdraw('trx', TRON, amount='0.1')
+        self.assertEqual(ctx.exception.code, 'amount_too_low')
+        self.assertEqual(len(self.sent), 1)
+        self._withdraw('trx', TRON, amount='0.2')
+        self.assertEqual(len(self.sent), 2)
+
+    def test_admin_set_minimum_is_enforced_and_shown(self):
+        from .models import CryptoWithdrawMinimum
+        from .withdrawals import withdraw_options
+
+        CryptoWithdrawMinimum.objects.create(coin='btc', network='BEP20', min_amount=Decimal('0.5'))
+        with self.assertRaises(CryptoServiceError) as ctx:
+            self._withdraw('btc', EVM, amount='0.4')
+        self.assertEqual(ctx.exception.code, 'amount_too_low')
+        self.assertEqual(self.sent, [])
+
+        tickers = {'btcngn': {'ticker': {'last': '50000'}}, 'usdtngn': {'ticker': {'last': '1600'}}}
+        with mock.patch('crypto.withdrawals._raw_tickers', return_value=tickers), mock.patch(
+            'crypto.services._raw_tickers', return_value=tickers
+        ):
+            btc = next(c for c in withdraw_options(self.user)['coins'] if c['coin'] == 'btc')
+        self.assertEqual(btc['networks'][0]['min_amount'], '0.5')
 
     def test_options_show_balance_conversions_limits_and_networks(self):
         from .withdrawals import withdraw_options
@@ -1420,7 +1461,7 @@ class WithdrawalNetworkTests(TestCase):
             options = withdraw_options(self.user)
 
         btc = next(c for c in options['coins'] if c['coin'] == 'btc')
-        self.assertEqual(btc['networks'], [{'code': 'BEP20', 'label': 'BEP20 (BNB Smart Chain)'}])
+        self.assertEqual(btc['networks'], [{'code': 'BEP20', 'label': 'BEP20 (BNB Smart Chain)', 'min_amount': None}])
         self.assertEqual(btc['available_ngn'], '150000.00')
         self.assertEqual(btc['available_usd'], '93.75')
         self.assertEqual(btc['rate_usd'], '31.25')

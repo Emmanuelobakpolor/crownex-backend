@@ -20,6 +20,7 @@ from . import quidax
 from .models import (
     CryptoWallet,
     CryptoWithdrawal,
+    CryptoWithdrawMinimum,
     CryptoWithdrawalLog,
     FeeType,
     WithdrawalStatus,
@@ -28,6 +29,7 @@ from .models import (
 from .quidax import QuidaxError
 from .services import (
     MIN_ORDER_NOTIONAL_NGN,
+    NETWORK_LABELS,
     CryptoServiceError,
     _logo_url,
     _raw_tickers,
@@ -42,6 +44,7 @@ from .services import (
     forget_withdraw_networks,
     get_coin_rate_ngn,
     get_usd_rate_ngn,
+    plain_decimal,
     release_reserved_crypto,
     reserve_crypto,
     validate_withdraw_network,
@@ -182,9 +185,36 @@ def _failure_note(withdrawal: CryptoWithdrawal, quidax_message: str) -> str:
     """What the user reads when Quidax refuses — the raw reason stays in the log."""
     coin = withdrawal.coin.upper()
     returned = f'Your {coin} has been returned to your balance.'
-    if 'not allowed' in quidax_message.lower():
-        return f'Sending {coin} on {withdrawal.network} is temporarily unavailable. {returned}'
+    network = NETWORK_LABELS.get(withdrawal.network, withdrawal.network)
+    message = quidax_message.lower()
+    if 'not allowed' in message:
+        return f'Sending {coin} on {network} is temporarily unavailable. {returned}'
+    if 'minimum withdrawal' in message:
+        return (
+            f'{plain_decimal(withdrawal.net_amount)} {coin} is below the minimum Quidax allows on {network}. '
+            f'Please send a larger amount. {returned}'
+        )
     return f'Withdrawal failed: {quidax_message}. {returned}'
+
+
+def _quidax_minimums() -> dict[tuple[str, str], Decimal]:
+    """(coin, network) -> the smallest amount Quidax should accept, where known."""
+    return {
+        (row.coin, row.network): row.effective_min
+        for row in CryptoWithdrawMinimum.objects.all()
+        if row.effective_min > 0
+    }
+
+
+def _learn_minimum(withdrawal: CryptoWithdrawal) -> None:
+    """Quidax refused this amount as below its minimum: never offer it again."""
+    with transaction.atomic():
+        row, _ = CryptoWithdrawMinimum.objects.select_for_update().get_or_create(
+            coin=withdrawal.coin, network=withdrawal.network
+        )
+        if withdrawal.net_amount > row.refused_below:
+            row.refused_below = withdrawal.net_amount
+            row.save(update_fields=['refused_below', 'updated_at'])
 
 
 def _execute_quidax_withdrawal(withdrawal: CryptoWithdrawal) -> CryptoWithdrawal:
@@ -202,6 +232,8 @@ def _execute_quidax_withdrawal(withdrawal: CryptoWithdrawal) -> CryptoWithdrawal
     except QuidaxError as exc:
         _log(withdrawal, 'quidax_error', f'Withdrawal request failed: {exc.message}')
         forget_withdraw_networks()  # it may have just switched this network off
+        if 'minimum withdrawal' in exc.message.lower():
+            _learn_minimum(withdrawal)
         release_reserved_crypto(withdrawal.user, withdrawal.coin, withdrawal.amount)
         _log(
             withdrawal,
@@ -290,6 +322,7 @@ def withdraw_options(user) -> dict:
     daily_limit = Decimal(str(settings.CRYPTO_WITHDRAW_DAILY_LIMIT_NGN))
     daily_remaining = max(daily_limit - _daily_withdrawn_ngn(user), Decimal('0'))
     balances = {w.coin: w.available for w in CryptoWallet.objects.filter(user=user)}
+    minimums = _quidax_minimums()
 
     rows = []
     for coin, meta in all_coins().items():
@@ -303,7 +336,10 @@ def withdraw_options(user) -> dict:
             'logo_url': _logo_url(coin),
             'color': meta.get('color', '#0052FF'),
             'letter': coin[0].upper(),
-            'networks': withdraw_networks(coin),
+            'networks': [
+                {**n, 'min_amount': plain_decimal(minimums[coin, n['code']]) if (coin, n['code']) in minimums else None}
+                for n in withdraw_networks(coin)
+            ],
             'available': str(available),
             'rate_ngn': None,
             'rate_usd': None,
@@ -361,6 +397,14 @@ def request_withdrawal(
     notional_ngn = Decimal(estimate['notional_ngn'])
     fee_coin = Decimal(estimate['fee_coin'])
     net_amount = Decimal(estimate['net_amount'])
+
+    quidax_min = _quidax_minimums().get((coin, network))
+    if quidax_min is not None and net_amount < quidax_min:
+        raise CryptoServiceError(
+            f'The minimum you can send on {NETWORK_LABELS.get(network, network)} is '
+            f'{plain_decimal(quidax_min)} {coin.upper()} (after fees).',
+            code='amount_too_low',
+        )
 
     daily_limit = Decimal(str(settings.CRYPTO_WITHDRAW_DAILY_LIMIT_NGN))
     if _daily_withdrawn_ngn(user) + notional_ngn > daily_limit:

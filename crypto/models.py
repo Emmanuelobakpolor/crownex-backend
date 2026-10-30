@@ -45,6 +45,48 @@ class CryptoFeeSettings(models.Model):
         return f'{self.fee_type}: ${self.flat_usd} + {self.percent}%'
 
 
+class CryptoWithdrawMinimum(models.Model):
+    """Quidax's own minimum withdrawal for a coin on a network. Its API
+    doesn't publish one, so it is set here by an admin (copied from the
+    Quidax dashboard) and/or learned from Quidax refusing an amount as
+    "lower than the minimum withdrawal limit"."""
+
+    coin = models.CharField(max_length=10)
+    network = models.CharField(max_length=20, help_text='Uppercase, e.g. BTC, BEP20, TRC20.')
+    min_amount = models.DecimalField(
+        max_digits=24,
+        decimal_places=8,
+        null=True,
+        blank=True,
+        help_text="Quidax's minimum, in the coin. Leave empty if unknown.",
+    )
+    refused_below = models.DecimalField(
+        max_digits=24,
+        decimal_places=8,
+        default=0,
+        help_text='Largest amount Quidax refused as below its minimum — learned automatically.',
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['coin', 'network']
+        constraints = [
+            models.UniqueConstraint(fields=['coin', 'network'], name='unique_crypto_withdraw_minimum'),
+        ]
+
+    def __str__(self):
+        return f'{self.coin.upper()} on {self.network}: min {self.min_amount or "?"}'
+
+    @property
+    def effective_min(self):
+        """The smallest amount worth sending to Quidax: its known minimum,
+        or just above the largest amount it has refused."""
+        from decimal import Decimal
+
+        learned = self.refused_below + Decimal('0.00000001') if self.refused_below > 0 else Decimal('0')
+        return max(self.min_amount or Decimal('0'), learned)
+
+
 class CryptoWallet(models.Model):
     """Internal per-user, per-coin ledger — the ONLY balance the app shows.
 
