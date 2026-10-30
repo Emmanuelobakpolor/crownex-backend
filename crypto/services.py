@@ -166,7 +166,9 @@ def validate_withdraw_network(coin: str, network: str | None) -> str:
     """Normalised (uppercase) withdrawal network, one Quidax currently
     allows. A client that sends none gets the coin's only network, or its
     default one — except a stablecoin, where guessing the chain loses funds."""
-    allowed = [n['code'] for n in withdraw_networks(coin)]
+    networks = withdraw_networks(coin)
+    allowed = [n['code'] for n in networks]
+    labels = ', '.join(n['label'] for n in networks)
     if not allowed:
         raise CryptoServiceError(
             f'Sending {coin.upper()} is temporarily unavailable. Please try again later.',
@@ -176,12 +178,14 @@ def validate_withdraw_network(coin: str, network: str | None) -> str:
     if not network_key:
         if coin in COIN_NETWORKS and len(allowed) > 1:
             raise CryptoServiceError(
-                f'Select a network for {coin.upper()}: {", ".join(allowed)}.', code='network_required'
+                f'Select a network for {coin.upper()}: {labels}.', code='network_required'
             )
         return allowed[0]
     if network_key not in allowed:
         raise CryptoServiceError(
-            f'{coin.upper()} can only be sent on {", ".join(allowed)} right now.', code='unsupported_network'
+            f'{coin.upper()} can only be sent on {labels} right now. '
+            'Please select the network again and check your address matches it.',
+            code='unsupported_network',
         )
     return network_key
 
