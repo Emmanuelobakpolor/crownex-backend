@@ -16,12 +16,14 @@ before anything is debited.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from decimal import Decimal
 from urllib.parse import quote
 
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
+from django.utils import timezone
 
 from wallet.services import WalletServiceError, credit_wallet, debit_wallet
 
@@ -80,31 +82,63 @@ def _products_page(country_code: str, product_name: str | None = None) -> list[d
     return items
 
 
+# Reloadly's catalogue has no stock data — a product can be listed ACTIVE
+# and still get every order refunded (seen with Abercrombie & Fitch US).
+# So a product the provider failed/refunded recently is treated as out of
+# stock for this long, on top of whatever status the catalogue reports.
+_UNAVAILABLE_AFTER_FAILURE = timedelta(hours=24)
+
+UNAVAILABLE_MESSAGE = 'This gift card is currently unavailable. Please choose another one.'
+
+
+def _recently_failed_product_ids() -> set[int]:
+    """Products with an order the provider failed/refunded recently. Only
+    provider-side outcomes count (their notes say "at provider"), not our
+    own request errors like a network blip."""
+    return set(
+        GiftCardPurchase.objects.filter(
+            status=GiftCardStatus.FAILED,
+            note__contains='at provider',
+            updated_at__gte=timezone.now() - _UNAVAILABLE_AFTER_FAILURE,
+        ).values_list('product_id', flat=True)
+    )
+
+
+def _is_available(item: dict, failed_ids: set[int]) -> bool:
+    status = str(item.get('status') or 'ACTIVE').upper()
+    return status == 'ACTIVE' and item.get('productId') not in failed_ids
+
+
 def get_brands(country_code: str) -> list[dict]:
-    """Deduplicated brand list for a country, from the raw /products page."""
-    seen = set()
-    brands = []
+    """Deduplicated brand list for a country, from the raw /products page.
+    A brand is available if any of its products is."""
+    failed_ids = _recently_failed_product_ids()
+    by_id: dict = {}
     for item in _products_page(country_code):
         brand = item.get('brand') or {}
         brand_id = brand.get('brandId')
-        if brand_id is None or brand_id in seen:
+        if brand_id is None:
             continue
-        seen.add(brand_id)
+        available = _is_available(item, failed_ids)
+        if brand_id in by_id:
+            by_id[brand_id]['available'] = by_id[brand_id]['available'] or available
+            continue
         logo_urls = item.get('logoUrls') or []
-        brands.append(
-            {
-                'brand_id': brand_id,
-                'brand_name': brand.get('brandName') or item.get('productName'),
-                'logo_url': logo_urls[0] if logo_urls else None,
-            }
-        )
-    brands.sort(key=lambda b: (b['brand_name'] or '').lower())
+        by_id[brand_id] = {
+            'brand_id': brand_id,
+            'brand_name': brand.get('brandName') or item.get('productName'),
+            'logo_url': logo_urls[0] if logo_urls else None,
+            'available': available,
+        }
+    brands = list(by_id.values())
+    brands.sort(key=lambda b: (not b['available'], (b['brand_name'] or '').lower()))
     return brands
 
 
 def get_products(brand: str, country_code: str) -> list[dict]:
     """Fixed denominations (one row each) or an open USD range for a brand."""
     rate = get_rate()
+    failed_ids = _recently_failed_product_ids()
     rows = []
     for item in _products_page(country_code, product_name=brand):
         product_id = item.get('productId')
@@ -116,6 +150,7 @@ def get_products(brand: str, country_code: str) -> list[dict]:
             'redeem_instruction': redeem_instruction,
             'discount_percentage': item.get('discountPercentage'),
             'sender_fee': item.get('senderFee'),
+            'available': _is_available(item, failed_ids),
         }
 
         fixed = item.get('fixedRecipientDenominations') or []
@@ -155,6 +190,9 @@ def _resolve_unit_price(
     for item in _products_page(country_code, product_name=brand):
         if item.get('productId') != product_id:
             continue
+
+        if not _is_available(item, _recently_failed_product_ids()):
+            raise GiftCardServiceError(UNAVAILABLE_MESSAGE, code='product_unavailable', status=409)
 
         fixed = item.get('fixedRecipientDenominations') or []
         if fixed:

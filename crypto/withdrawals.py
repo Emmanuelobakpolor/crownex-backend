@@ -10,7 +10,7 @@ daily cap, balance reservation) are what make it safe to run unattended.
 from __future__ import annotations
 
 import re
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -18,6 +18,7 @@ from django.utils import timezone
 
 from . import quidax
 from .models import (
+    CryptoWallet,
     CryptoWithdrawal,
     CryptoWithdrawalLog,
     FeeType,
@@ -28,15 +29,22 @@ from .quidax import QuidaxError
 from .services import (
     MIN_ORDER_NOTIONAL_NGN,
     CryptoServiceError,
+    _logo_url,
+    _raw_tickers,
+    _resolve_rate,
     _validate_coin,
+    all_coins,
     check_transaction_pin,
+    coin_capabilities,
     compute_fee_ngn,
     credit_crypto_available,
     debit_reserved_crypto,
     get_coin_rate_ngn,
+    get_usd_rate_ngn,
     release_reserved_crypto,
     reserve_crypto,
-    validate_network,
+    validate_withdraw_network,
+    withdraw_networks,
 )
 
 # Loose but real per-(coin, network) address shape checks — enough to catch
@@ -56,6 +64,7 @@ _ADDRESS_PATTERNS: dict[tuple[str, str], re.Pattern] = {
     ('usdc', 'ERC20'): _EVM_ADDRESS,
     ('usdc', 'BEP20'): _EVM_ADDRESS,
     ('usdc', 'POLYGON'): _EVM_ADDRESS,
+    ('sol', 'BEP20'): _EVM_ADDRESS,
     ('sol', ''): re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$'),
     ('trx', ''): _TRON_ADDRESS,
     ('ltc', ''): re.compile(r'^(ltc1[a-z0-9]{25,59}|[LM3][a-km-zA-HJ-NP-Z1-9]{25,34})$'),
@@ -161,7 +170,7 @@ def _execute_quidax_withdrawal(withdrawal: CryptoWithdrawal) -> CryptoWithdrawal
             currency=withdrawal.coin,
             amount=volume,
             address=withdrawal.address,
-            network=withdrawal.network or None,
+            network=withdrawal.network.lower() or None,  # Quidax names networks in lowercase
             reference=withdrawal.reference,
             user_id=settings.QUIDAX_USER_ID,
         )
@@ -241,6 +250,64 @@ def estimate_withdrawal(*, coin: str, amount: Decimal) -> dict:
     }
 
 
+_COIN_QUANTUM = Decimal('0.00000001')
+
+
+def withdraw_options(user) -> dict:
+    """Everything the send screen needs to pick a coin: each withdrawable
+    coin's balance (in coin, NGN and USD), its networks, and the smallest
+    and largest amount the user can send right now — the larger capped by
+    both their balance and what's left of today's NGN limit. Display only:
+    request_withdrawal re-checks all of it."""
+    tickers = _raw_tickers()
+    usd_rate = get_usd_rate_ngn()
+    daily_limit = Decimal(str(settings.CRYPTO_WITHDRAW_DAILY_LIMIT_NGN))
+    daily_remaining = max(daily_limit - _daily_withdrawn_ngn(user), Decimal('0'))
+    balances = {w.coin: w.available for w in CryptoWallet.objects.filter(user=user)}
+
+    rows = []
+    for coin, meta in all_coins().items():
+        if not coin_capabilities(coin)['withdraw'] or not withdraw_networks(coin):
+            continue
+        available = balances.get(coin, Decimal('0'))
+        rate = _resolve_rate(tickers, coin)
+        row = {
+            'coin': coin,
+            'name': meta['name'],
+            'logo_url': _logo_url(coin),
+            'color': meta.get('color', '#0052FF'),
+            'letter': coin[0].upper(),
+            'networks': withdraw_networks(coin),
+            'available': str(available),
+            'rate_ngn': None,
+            'rate_usd': None,
+            'available_ngn': None,
+            'available_usd': None,
+            'min_amount': None,
+            'max_amount': None,
+        }
+        if rate is not None:
+            min_amount = (MIN_ORDER_NOTIONAL_NGN / rate).quantize(_COIN_QUANTUM, rounding=ROUND_UP)
+            max_amount = min(available, (daily_remaining / rate).quantize(_COIN_QUANTUM, rounding=ROUND_DOWN))
+            row.update(
+                rate_ngn=str(rate),
+                rate_usd=str((rate / usd_rate).quantize(Decimal('0.01'))),
+                available_ngn=str((available * rate).quantize(Decimal('0.01'))),
+                available_usd=str((available * rate / usd_rate).quantize(Decimal('0.01'))),
+                min_amount=str(min_amount),
+                max_amount=str(max_amount),
+            )
+        rows.append(row)
+
+    return {
+        'usd_rate_ngn': str(usd_rate),
+        'min_ngn': str(MIN_ORDER_NOTIONAL_NGN),
+        'daily_limit_ngn': str(daily_limit),
+        'daily_remaining_ngn': str(daily_remaining.quantize(Decimal('0.01'))),
+        'coins': rows,
+    }
+
+
 def request_withdrawal(
     user,
     *,
@@ -261,7 +328,7 @@ def request_withdrawal(
 
     estimate = estimate_withdrawal(coin=coin, amount=amount)
     coin = estimate['coin']
-    network = validate_network(coin, network)
+    network = validate_withdraw_network(coin, network)
     _validate_address(coin, network, address)
 
     rate = Decimal(estimate['rate_ngn'])

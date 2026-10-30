@@ -15,16 +15,20 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from . import quidax, settlements
 from .models import CryptoDepositAddress, CryptoDepositEvent, CryptoOrder, OrderStatus, QuidaxSubAccount
 from .orders import _log as _log_order_event
 from .quidax import QuidaxError
 from .services import CryptoServiceError, _validate_coin, credit_crypto_available, validate_network
+from .withdrawals import _ADDRESS_PATTERNS as ADDRESS_PATTERNS
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +137,16 @@ def get_or_create_sub_account(user) -> QuidaxSubAccount:
     return _link_sub_account(user, payload.get('data') or {})
 
 
-def _pick_address(payload: dict, network_key: str) -> tuple[str, str] | None:
+def _address_fits(coin: str, network_key: str, address: str) -> bool:
+    """Whether `address` has the right shape for this coin/network. Quidax
+    lists every address a wallet has, including token networks: its BTC
+    wallet can hold only a BEP20 (0x...) address, which must never be shown
+    as a plain Bitcoin address. Coins with no known pattern pass."""
+    pattern = ADDRESS_PATTERNS.get((coin, network_key)) or ADDRESS_PATTERNS.get((coin, ''))
+    return pattern is None or bool(pattern.match(address.strip()))
+
+
+def _pick_address(payload: dict, coin: str, network_key: str) -> tuple[str, str] | None:
     data = payload.get('data')
     rows = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
     for row in rows:
@@ -143,7 +156,7 @@ def _pick_address(payload: dict, network_key: str) -> tuple[str, str] | None:
         if network_key and row_network and row_network != network_key:
             continue
         address = row.get('address')
-        if address:
+        if address and _address_fits(coin, network_key, address):
             return address, str(row.get('id') or '')
     return None
 
@@ -153,8 +166,14 @@ def get_deposit_address(user, coin: str, *, network: str | None = None) -> Crypt
     network_key = validate_network(coin, network)
 
     cached = CryptoDepositAddress.objects.filter(user=user, coin=coin, network=network_key).first()
-    if cached:
+    if cached and _address_fits(coin, network_key, cached.address):
         return cached
+    if cached:
+        logger.warning(
+            'Dropping cached %s deposit address %s for %s: wrong format for the network.',
+            coin, cached.address, user.email,
+        )
+        cached.delete()
 
     sub_account = get_or_create_sub_account(user)
 
@@ -165,21 +184,31 @@ def get_deposit_address(user, coin: str, *, network: str | None = None) -> Crypt
             f'Could not load deposit address: {exc.message}', code='quidax_unreachable', status=502
         )
 
-    found = _pick_address(list_payload, network_key)
+    found = _pick_address(list_payload, coin, network_key)
 
     if not found:
-        try:
-            create_payload = quidax.create_deposit_address(
-                sub_account.quidax_user_id, coin, network=network or None
-            )
-        except QuidaxError as exc:
-            raise CryptoServiceError(
-                f'Could not create deposit address: {exc.message}',
-                code='quidax_unreachable',
-                status=502,
-            )
-        # Usually the new address comes straight back in the create response.
-        found = _pick_address(create_payload, network_key)
+        # Without a network Quidax creates the coin's default address, which
+        # for BTC is a BEP20 one; asking for the coin's own network (Quidax
+        # names native networks after the coin) is the second try.
+        attempts = [network or None] if network else [None, coin]
+        for i, attempt in enumerate(attempts):
+            try:
+                create_payload = quidax.create_deposit_address(
+                    sub_account.quidax_user_id, coin, network=attempt
+                )
+            except QuidaxError as exc:
+                if i == 0:
+                    raise CryptoServiceError(
+                        f'Could not create deposit address: {exc.message}',
+                        code='quidax_unreachable',
+                        status=502,
+                    )
+                logger.warning('Quidax refused a %s deposit address on network %r: %s', coin, attempt, exc.message)
+                break
+            # Usually the new address comes straight back in the create response.
+            found = _pick_address(create_payload, coin, network_key)
+            if found:
+                break
 
         # Quidax generates some addresses asynchronously and notifies via the
         # wallet.address.generated webhook (see handle_address_generated_webhook) —
@@ -190,7 +219,7 @@ def get_deposit_address(user, coin: str, *, network: str | None = None) -> Crypt
                 list_payload = quidax.list_deposit_addresses(sub_account.quidax_user_id, coin)
             except QuidaxError:
                 break
-            found = _pick_address(list_payload, network_key)
+            found = _pick_address(list_payload, coin, network_key)
             if found:
                 break
 
@@ -231,6 +260,9 @@ def handle_address_generated_webhook(payload: dict) -> None:
 
     sub_account = QuidaxSubAccount.objects.filter(quidax_user_id=quidax_user_id).first()
     if not sub_account:
+        return
+    if not _address_fits(coin, network_key, address_value):
+        logger.warning('Ignoring generated %s address %s on network %r: wrong format.', coin, address_value, network_key)
         return
 
     CryptoDepositAddress.objects.get_or_create(
@@ -300,13 +332,25 @@ def _credit_deposit(user, data: dict) -> bool:
     return created
 
 
-def reconcile_deposits(user, coin: str, *, apply: bool = False) -> list[dict]:
+def _deposit_time(row: dict):
+    for key in ('created_at', 'done_at', 'updated_at'):
+        value = parse_datetime(str(row.get(key) or ''))
+        if value is not None:
+            return value
+    return None
+
+
+def reconcile_deposits(
+    user, coin: str, *, apply: bool = False, max_age: timedelta | None = None
+) -> list[dict]:
     """Pull the user's deposits from Quidax and credit any accepted ones we
     have no CryptoDepositEvent for — the fallback for a missed
     deposit.successful webhook. Safe to re-run: crediting is idempotent.
 
     Returns one summary dict per deposit Quidax reported. With apply=False
-    nothing is written (dry run)."""
+    nothing is written (dry run). With max_age, a deposit older than that
+    (or of unknown age) is reported as too_old instead of credited — an old
+    miss may already have been settled by hand, so it's left to an admin."""
     coin = _validate_coin(coin, None)
     sub_account = QuidaxSubAccount.objects.filter(user=user).first()
     if not sub_account:
@@ -343,12 +387,60 @@ def reconcile_deposits(user, coin: str, *, apply: bool = False) -> list[dict]:
             summary['action'] = 'already_credited'
         elif state not in _CREDITABLE_DEPOSIT_STATES:
             summary['action'] = 'skipped_not_accepted'
+        elif max_age is not None and not (
+            (made := _deposit_time(row)) and timezone.now() - made <= max_age
+        ):
+            summary['action'] = 'too_old'
         elif not apply:
             summary['action'] = 'would_credit'
         else:
             summary['action'] = 'credited' if _credit_deposit(user, row) else 'already_credited'
         results.append(summary)
     return results
+
+
+# Deposits this recent are credited automatically when their webhook was
+# missed; anything older needs `reconcile_crypto_deposits --apply`.
+AUTO_RECONCILE_MAX_AGE = timedelta(hours=72)
+
+
+def reconcile_recent_deposits(*, after_pk: int = 0, batch_size: int = 25) -> tuple[list[tuple], int]:
+    """One worker pass of missed-deposit recovery: checks the next
+    `batch_size` sub-accounts (those with a deposit address) after
+    `after_pk`, for every coin they have an address for. Returns the
+    (user, summary) pairs it credited and the cursor for the next pass —
+    0 once it wraps around."""
+    sub_accounts = list(
+        QuidaxSubAccount.objects.filter(pk__gt=after_pk, user__crypto_deposit_addresses__isnull=False)
+        .distinct()
+        .select_related('user')
+        .order_by('pk')[:batch_size]
+    )
+    credited = []
+    for sub_account in sub_accounts:
+        user = sub_account.user
+        coins = set(CryptoDepositAddress.objects.filter(user=user).values_list('coin', flat=True))
+        for coin in sorted(coins):
+            try:
+                results = reconcile_deposits(user, coin, apply=True, max_age=AUTO_RECONCILE_MAX_AGE)
+            except CryptoServiceError as exc:
+                logger.warning('Deposit reconcile for %s %s failed: %s', user.email, coin, exc.message)
+                continue
+            for r in results:
+                if r['action'] == 'credited':
+                    logger.warning(
+                        'Deposit %s (%s %s for %s) credited by reconciliation — its webhook never arrived.',
+                        r['id'], r['amount'], r['currency'], user.email,
+                    )
+                    credited.append((user, r))
+                elif r['action'] == 'too_old':
+                    logger.info(
+                        'Deposit %s (%s %s for %s) was never credited and is too old to credit '
+                        'automatically — check it and run reconcile_crypto_deposits --apply.',
+                        r['id'], r['amount'], r['currency'], user.email,
+                    )
+    next_pk = sub_accounts[-1].pk if len(sub_accounts) == batch_size else 0
+    return credited, next_pk
 
 
 def handle_order_webhook(payload: dict) -> None:

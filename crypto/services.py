@@ -102,6 +102,62 @@ COIN_NETWORKS: dict[str, tuple[str, ...]] = {
 }
 
 
+# Networks a withdrawal can go out on, per coin, named as in the Networks
+# column of Quidax's supported-cryptocurrencies table (uppercased here,
+# lowercased on the way to Quidax). Quidax refuses a blockchain withdrawal
+# that names no network ("Network is required"), so every withdrawable coin
+# needs at least one. The first entry is the default for a client that
+# sends none — except the stablecoins, where guessing the chain loses funds.
+WITHDRAW_NETWORKS: dict[str, tuple[str, ...]] = {
+    'btc': ('BTC',),
+    'eth': ('ERC20', 'BEP20'),
+    'usdt': COIN_NETWORKS['usdt'],
+    'usdc': COIN_NETWORKS['usdc'],
+    'sol': ('BEP20',),  # Quidax lists SOL on bep20 only — not native Solana
+    'xrp': ('RIPPLE',),
+    'ltc': ('LTC',),
+    'trx': ('TRC20',),
+    'dash': ('DASH',),
+}
+
+NETWORK_LABELS: dict[str, str] = {
+    'BTC': 'Bitcoin',
+    'ERC20': 'ERC20 (Ethereum)',
+    'BEP20': 'BEP20 (BNB Smart Chain)',
+    'TRC20': 'TRC20 (Tron)',
+    'POLYGON': 'Polygon',
+    'RIPPLE': 'XRP Ledger',
+    'LTC': 'Litecoin',
+    'DASH': 'Dash',
+}
+
+
+def withdraw_networks(coin: str) -> list[dict]:
+    return [{'code': n, 'label': NETWORK_LABELS.get(n, n)} for n in WITHDRAW_NETWORKS.get(coin, ())]
+
+
+def validate_withdraw_network(coin: str, network: str | None) -> str:
+    """Normalised (uppercase) withdrawal network. Every withdrawable coin
+    has one — see WITHDRAW_NETWORKS."""
+    allowed = WITHDRAW_NETWORKS.get(coin)
+    if not allowed:
+        raise CryptoServiceError(
+            f'{coin.upper()} withdrawals are not available yet.', code='withdraw_not_supported'
+        )
+    network_key = (network or '').upper()
+    if not network_key:
+        if coin in COIN_NETWORKS:
+            raise CryptoServiceError(
+                f'Select a network for {coin.upper()}: {", ".join(allowed)}.', code='network_required'
+            )
+        return allowed[0]
+    if network_key not in allowed:
+        raise CryptoServiceError(
+            f'{coin.upper()} can be sent on {", ".join(allowed)} only.', code='unsupported_network'
+        )
+    return network_key
+
+
 def validate_network(coin: str, network: str | None) -> str:
     """Normalised (uppercase) network, or '' for single-network coins.
     Rejects a missing or unsupported network for coins in COIN_NETWORKS."""
@@ -226,6 +282,12 @@ def get_coin_rate_ngn(coin: str) -> Decimal:
             f'Live price unavailable for {coin.upper()}.', code='price_unavailable', status=502
         )
     return rate
+
+
+def get_usd_rate_ngn() -> Decimal:
+    """NGN per USD for display — Quidax's live USDT/NGN price, falling back
+    to the configured NGN_PER_USD when that market has no price."""
+    return _market_last_price(_raw_tickers(), 'usdtngn') or Decimal(str(settings.NGN_PER_USD))
 
 
 def get_prices() -> list[dict]:

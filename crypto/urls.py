@@ -33,5 +33,10 @@ urlpatterns = [
         views.WithdrawEstimateView.as_view(),
         name='crypto-withdraw-estimate',
     ),
-    path('withdrawals/', views.WithdrawalHistoryView.as_view(), name='crypto-withdrawals'),
+    path(
+        'withdraw/options/',
+        views.WithdrawOptionsView.as_view(),
+        name='crypto-withdraw-options',
+    ),
+    path('withdrawals/',views.WithdrawalHistoryView.as_view(), name='crypto-withdrawals'),
 ]

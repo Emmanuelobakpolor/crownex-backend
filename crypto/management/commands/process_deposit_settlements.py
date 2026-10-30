@@ -1,6 +1,8 @@
 """Worker for deposit settlements: sweeps each credited deposit from the
 user's Quidax sub-account to the master account and, for auto-convert
-deposits, sells it to NGN. See crypto/settlements.py.
+deposits, sells it to NGN. See crypto/settlements.py. Once a minute it also
+credits recent deposits whose deposit.successful webhook never arrived
+(deposits.reconcile_recent_deposits), a batch of users at a time.
 
     python manage.py process_deposit_settlements            # one pass
     python manage.py process_deposit_settlements --loop     # Procfile worker
@@ -18,7 +20,7 @@ import time
 from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections
 
-from crypto import orders, settlements
+from crypto import deposits, orders, settlements
 from crypto.models import CryptoDepositSettlement, SettlementStatus
 from crypto.services import CryptoServiceError
 from giftcards.services import reconcile_pending_purchases
@@ -59,6 +61,7 @@ class Command(BaseCommand):
             return
 
         last_swap_check = 0.0
+        deposit_cursor = 0
         while True:
             close_old_connections()
             processed = settlements.process_due()
@@ -83,6 +86,13 @@ class Command(BaseCommand):
                             self.stdout.write(f'Gift card {purchase.reference}: {before} -> {purchase.status}')
                 except Exception:
                     logger.exception('giftcard_reconcile_error')
+                # Crypto deposits whose deposit.successful webhook never arrived.
+                try:
+                    credited, deposit_cursor = deposits.reconcile_recent_deposits(after_pk=deposit_cursor)
+                    for user, r in credited:
+                        self.stdout.write(f'Missed deposit {r["id"]}: credited {r["amount"]} {r["currency"]} to {user.email}')
+                except Exception:
+                    logger.exception('deposit_reconcile_error')
             if not options['loop']:
                 return
             time.sleep(options['interval'])

@@ -452,6 +452,18 @@ class WithdrawEstimateView(APIView):
         return Response(estimate)
 
 
+class WithdrawOptionsView(APIView):
+    """GET /api/crypto/withdraw/options/ — withdrawable coins with the user's
+    balance (coin/NGN/USD), networks, and min/max sendable amounts."""
+
+    def get(self, request):
+        try:
+            options = withdrawals.withdraw_options(request.user)
+        except services.CryptoServiceError as exc:
+            return _error_response(exc)
+        return Response(options)
+
+
 class WithdrawalHistoryView(APIView):
     """GET /api/crypto/withdrawals/ — latest 50 for the current user."""
 

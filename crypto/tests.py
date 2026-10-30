@@ -2,6 +2,7 @@
 flow it shares primitives with. Every Quidax call is faked — requests
 itself is patched to fail the test if anything tries the network."""
 
+from datetime import timedelta
 from decimal import ROUND_DOWN, Decimal
 from io import StringIO
 from unittest import mock
@@ -17,6 +18,7 @@ from wallet.models import Wallet
 from . import quidax, settlements
 from .deposits import handle_deposit_webhook
 from .models import (
+    CryptoDepositAddress,
     CryptoDepositEvent,
     CryptoDepositSettlement,
     CryptoFeeSettings,
@@ -1146,6 +1148,109 @@ class DepositAddressTests(SettlementTestBase):
         self.assertEqual(record.address, self.EVM)
         create.assert_not_called()
 
+    BTC = 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq'
+
+    def _btc_bep20(self):
+        return {'data': [{'id': 'bep', 'currency': 'btc', 'network': 'BEP20', 'address': self.EVM}]}
+
+    def test_btc_never_takes_the_bep20_address(self):
+        from .deposits import get_deposit_address
+
+        native = {'data': {'id': 'native', 'network': 'BTC', 'address': self.BTC}}
+        with mock.patch('crypto.quidax.list_deposit_addresses', return_value=self._btc_bep20()), \
+                mock.patch('crypto.quidax.create_deposit_address', side_effect=[self._btc_bep20(), native]) as create:
+            record = get_deposit_address(self.user, 'btc')
+        self.assertEqual((record.network, record.address), ('', self.BTC))
+        self.assertEqual([c.kwargs['network'] for c in create.call_args_list], [None, 'btc'])
+
+    def test_btc_without_a_native_address_errors_instead_of_showing_bep20(self):
+        from .deposits import get_deposit_address
+
+        with mock.patch('crypto.quidax.list_deposit_addresses', return_value=self._btc_bep20()), \
+                mock.patch('crypto.quidax.create_deposit_address', return_value=self._btc_bep20()), \
+                mock.patch('crypto.deposits.time.sleep'):
+            with self.assertRaises(CryptoServiceError) as ctx:
+                get_deposit_address(self.user, 'btc')
+        self.assertEqual(ctx.exception.code, 'address_pending')
+        self.assertFalse(CryptoDepositAddress.objects.filter(user=self.user, coin='btc').exists())
+
+    def test_cached_wrong_format_address_is_replaced(self):
+        from .deposits import get_deposit_address
+
+        CryptoDepositAddress.objects.create(user=self.user, coin='btc', network='', address=self.EVM)
+        listed = {'data': [{'id': 'native', 'network': 'BTC', 'address': self.BTC}]}
+        with mock.patch('crypto.quidax.list_deposit_addresses', return_value=listed):
+            record = get_deposit_address(self.user, 'btc')
+        self.assertEqual(record.address, self.BTC)
+        self.assertEqual(CryptoDepositAddress.objects.filter(user=self.user, coin='btc').count(), 1)
+
+    def test_generated_webhook_ignores_wrong_format_address(self):
+        from .deposits import handle_address_generated_webhook
+
+        handle_address_generated_webhook(
+            {'data': {'id': 'x', 'currency': 'btc', 'network': '', 'address': self.EVM, 'user': {'id': 'sub-1'}}}
+        )
+        self.assertFalse(CryptoDepositAddress.objects.exists())
+
+
+class MissedDepositReconcileTests(SettlementTestBase):
+    def setUp(self):
+        super().setUp()
+        CryptoDepositAddress.objects.create(user=self.user, coin='usdt', network='ERC20', address='0x' + 'a' * 40)
+
+    def _row(self, deposit_id, hours_ago, amount='40'):
+        made = timezone.now() - timedelta(hours=hours_ago) if hours_ago is not None else None
+        return {
+            'id': deposit_id, 'amount': amount, 'currency': 'USDT', 'status': 'accepted',
+            'created_at': made.isoformat() if made else None,
+        }
+
+    def _run(self, rows, **kwargs):
+        from .deposits import reconcile_recent_deposits
+
+        with mock.patch('crypto.quidax.list_deposits', return_value=rows):
+            return reconcile_recent_deposits(**kwargs)
+
+    def test_recent_missed_deposit_is_credited_once(self):
+        rows = [self._row('dep-new', 1)]
+        credited, _ = self._run(rows)
+        self.assertEqual([r['id'] for _, r in credited], ['dep-new'])
+        self.assertEqual(self.crypto().total, Decimal('40'))
+        self.assertTrue(CryptoDepositSettlement.objects.filter(deposit__quidax_deposit_id='dep-new').exists())
+
+        credited, _ = self._run(rows)
+        self.assertEqual(credited, [])
+        self.assertEqual(self.crypto().total, Decimal('40'))
+
+    def test_old_or_undated_deposits_are_left_for_an_admin(self):
+        credited, _ = self._run([self._row('dep-old', 24 * 20), self._row('dep-undated', None)])
+        self.assertEqual(credited, [])
+        self.assertFalse(CryptoDepositEvent.objects.exists())
+
+    def test_manual_command_still_credits_old_deposits(self):
+        from .deposits import reconcile_deposits
+
+        with mock.patch('crypto.quidax.list_deposits', return_value=[self._row('dep-old', 24 * 20, '5')]):
+            results = reconcile_deposits(self.user, 'usdt', apply=True)
+        self.assertEqual(results[0]['action'], 'credited')
+        self.assertEqual(self.crypto().total, Decimal('5'))
+
+    def test_users_without_deposit_addresses_are_skipped_and_cursor_wraps(self):
+        self._make_user('no-address@example.com', 'sub-2')
+        other = self._make_user('b@example.com', 'sub-3')
+        CryptoDepositAddress.objects.create(user=other, coin='usdt', network='TRC20', address='T' + 'a' * 33)
+
+        with mock.patch('crypto.quidax.list_deposits', return_value=[]) as listed:
+            from .deposits import reconcile_recent_deposits
+
+            _, cursor = reconcile_recent_deposits(batch_size=1)
+            self.assertEqual(cursor, self.user.quidax_subaccount.pk)
+            _, cursor = reconcile_recent_deposits(after_pk=cursor, batch_size=1)
+            self.assertEqual(cursor, other.quidax_subaccount.pk)
+            _, cursor = reconcile_recent_deposits(after_pk=cursor, batch_size=1)
+            self.assertEqual(cursor, 0)
+        self.assertEqual([c.args[0] for c in listed.call_args_list], ['sub-1', 'sub-3'])
+
 
 class NetworkValidationTests(TestCase):
     def test_supported_networks(self):
@@ -1171,3 +1276,91 @@ class NetworkValidationTests(TestCase):
         with mock.patch('crypto.quidax.requests.request', side_effect=AssertionError('real Quidax call')):
             with self.assertRaises(CryptoServiceError):
                 get_deposit_address(user, 'usdc', network='TRC20')
+
+
+@override_settings(QUIDAX_SECRET_KEY='', QUIDAX_USER_ID='me', CRYPTO_WITHDRAW_DAILY_LIMIT_NGN=Decimal('100000'))
+class WithdrawalNetworkTests(TestCase):
+    """Quidax refuses a blockchain withdrawal that names no network, so every
+    withdrawal must carry one — the coin's own when it has only one."""
+
+    def setUp(self):
+        self.sent: list[dict] = []
+        patches = [
+            mock.patch('crypto.quidax.requests.request', side_effect=AssertionError('real Quidax call')),
+            mock.patch('crypto.quidax.create_withdrawal', side_effect=self._create_withdrawal),
+            mock.patch('crypto.withdrawals.get_coin_rate_ngn', return_value=Decimal('50000')),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.user = User.objects.create_user(email='w@example.com', password='x', full_name='W W')
+        self.user.set_transaction_pin('1234')
+        self.user.save()
+
+    def _create_withdrawal(self, **kw):
+        self.sent.append(kw)
+        return {'data': {'id': f'qw-{len(self.sent)}'}}
+
+    def _withdraw(self, coin, address, network=None, amount='1'):
+        from .withdrawals import request_withdrawal
+
+        CryptoWallet.objects.update_or_create(user=self.user, coin=coin, defaults={'available': Decimal('5')})
+        return request_withdrawal(
+            self.user, coin=coin, amount=Decimal(amount), address=address, pin='1234', network=network
+        )
+
+    def test_single_network_coin_sends_its_network_lowercase(self):
+        w = self._withdraw('btc', 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq')
+        self.assertEqual(w.network, 'BTC')
+        self.assertEqual(self.sent[0]['network'], 'btc')
+
+    def test_native_network_names_follow_quidax(self):
+        self._withdraw('trx', 'T' + 'a' * 33)
+        self._withdraw('xrp', 'rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH')
+        self.assertEqual([s['network'] for s in self.sent], ['trc20', 'ripple'])
+
+    def test_eth_defaults_to_erc20_and_accepts_bep20(self):
+        self._withdraw('eth', '0x' + 'a' * 40)
+        self._withdraw('eth', '0x' + 'a' * 40, network='bep20')
+        self.assertEqual([s['network'] for s in self.sent], ['erc20', 'bep20'])
+
+    def test_stablecoin_without_network_is_refused_before_quidax(self):
+        with self.assertRaises(CryptoServiceError) as ctx:
+            self._withdraw('usdt', 'T' + 'a' * 33)
+        self.assertEqual(ctx.exception.code, 'network_required')
+        self.assertEqual(self.sent, [])
+
+    def test_usdt_trc20_is_sent_lowercase(self):
+        self._withdraw('usdt', 'T' + 'a' * 33, network='TRC20')
+        self.assertEqual(self.sent[0]['network'], 'trc20')
+
+    def test_unsupported_network_is_refused(self):
+        with self.assertRaises(CryptoServiceError) as ctx:
+            self._withdraw('btc', 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq', network='bep20')
+        self.assertEqual(ctx.exception.code, 'unsupported_network')
+
+    def test_options_show_balance_conversions_and_limits(self):
+        from .withdrawals import withdraw_options
+
+        CryptoWallet.objects.create(user=self.user, coin='btc', available=Decimal('3'))
+        tickers = {
+            'btcngn': {'ticker': {'last': '50000'}},
+            'usdtngn': {'ticker': {'last': '1600'}},
+        }
+        with mock.patch('crypto.withdrawals._raw_tickers', return_value=tickers), mock.patch(
+            'crypto.services._raw_tickers', return_value=tickers
+        ):
+            options = withdraw_options(self.user)
+
+        btc = next(c for c in options['coins'] if c['coin'] == 'btc')
+        self.assertEqual(btc['networks'], [{'code': 'BTC', 'label': 'Bitcoin'}])
+        self.assertEqual(btc['available_ngn'], '150000.00')
+        self.assertEqual(btc['available_usd'], '93.75')
+        self.assertEqual(btc['rate_usd'], '31.25')
+        self.assertEqual(Decimal(btc['min_amount']), Decimal('0.02'))  # ₦1,000 / ₦50,000
+        self.assertEqual(Decimal(btc['max_amount']), Decimal('2'))  # ₦100,000 daily limit, below the 3 BTC held
+        self.assertEqual(options['daily_remaining_ngn'], '100000.00')
+        eth = next(c for c in options['coins'] if c['coin'] == 'eth')  # no ethngn price
+        self.assertEqual(eth['available'], '0')
+        self.assertIsNone(eth['rate_ngn'])
+        self.assertIsNone(eth['max_amount'])
