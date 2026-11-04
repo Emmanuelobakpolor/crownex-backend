@@ -69,15 +69,26 @@ def create_and_send_otp(user: User, purpose: str = OTPPurpose.REGISTRATION) -> s
                 status=429,
             )
 
-    _invalidate_active_otps(user, purpose)
     plain = generate_otp_code()
-    VerificationOTP.objects.create(
-        user=user,
-        code_hash=hash_code(plain),
-        purpose=purpose,
-        expires_at=otp_expiry(),
-    )
-    send_otp_email(user.email, plain, purpose=purpose)
+    try:
+        # Roll the new code back if the email fails, so an unsent code
+        # neither replaces the previous one nor triggers the cooldown.
+        with transaction.atomic():
+            _invalidate_active_otps(user, purpose)
+            VerificationOTP.objects.create(
+                user=user,
+                code_hash=hash_code(plain),
+                purpose=purpose,
+                expires_at=otp_expiry(),
+            )
+            send_otp_email(user.email, plain, purpose=purpose)
+    except Exception as exc:
+        raise AuthServiceError(
+            "We couldn't send your verification code right now. "
+            'Please try again in a few minutes.',
+            code='email_send_failed',
+            status=503,
+        ) from exc
     return plain
 
 

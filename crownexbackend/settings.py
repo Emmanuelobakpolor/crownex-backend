@@ -271,17 +271,17 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_CREDENTIALS = True
 
 
-# Email — defaults to console (OTP prints in runserver output).
-# To send through SendGrid instead, set in .env (see .env.example):
-#   EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
-#   SENDGRID_API_KEY=SG.xxxxxxxx
-# No code changes needed to switch.
-EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
-EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.sendgrid.net')
-EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
-EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() == 'true'
-EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', 'apikey')  # SendGrid SMTP always uses literal 'apikey'
-EMAIL_HOST_PASSWORD = os.environ.get('SENDGRID_API_KEY', '')
+# Email — sent through Resend's HTTP API when RESEND_API_KEY is set
+# (accounts/resend_backend.py); otherwise falls back to EMAIL_BACKEND,
+# which defaults to console (OTP prints in runserver output).
+# Stripped: a pasted key with a trailing newline/space is rejected.
+RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '').strip()
+if RESEND_API_KEY:
+    EMAIL_BACKEND = 'accounts.resend_backend.ResendEmailBackend'
+else:
+    EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+# Fail fast instead of hanging the request if the email API stalls.
+EMAIL_TIMEOUT = int(os.environ.get('EMAIL_TIMEOUT', 15))
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'CrownEx <noreply@crownex.app>')
 
 

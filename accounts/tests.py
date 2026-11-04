@@ -246,3 +246,62 @@ class AuthFlowTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertIn('access', res.data)
         self.assertTrue(User.objects.filter(pk=user.pk).exists())
+
+    def test_register_email_failure_returns_503_and_rolls_back(self):
+        from smtplib import SMTPServerDisconnected
+        from unittest import mock
+
+        with mock.patch(
+            'accounts.services.send_otp_email',
+            side_effect=SMTPServerDisconnected('Connection unexpectedly closed'),
+        ):
+            res = self.client.post(
+                '/api/auth/register/',
+                {'email': self.email, 'phone': self.phone},
+                format='json',
+            )
+        self.assertEqual(res.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(res.data['code'], 'email_send_failed')
+        self.assertFalse(User.objects.filter(email=self.email).exists())
+        self.assertFalse(VerificationOTP.objects.exists())
+
+
+@override_settings(RESEND_API_KEY='re_test', DEFAULT_FROM_EMAIL='CrownEx <noreply@crownex.app>')
+class ResendBackendTests(TestCase):
+    def _send(self, response_status=200, body=None):
+        from unittest import mock
+
+        from django.core.mail import send_mail
+
+        fake = mock.Mock(status_code=response_status)
+        fake.json.return_value = body or {'id': 'abc'}
+        with mock.patch('accounts.resend_backend.requests.post', return_value=fake) as post:
+            send_mail(
+                subject='Code',
+                message='Your code is 1234',
+                from_email=None,
+                recipient_list=['john@example.com'],
+                fail_silently=False,
+                connection=self._backend(),
+            )
+        return post
+
+    def _backend(self):
+        from .resend_backend import ResendEmailBackend
+
+        return ResendEmailBackend()
+
+    def test_posts_message_to_resend(self):
+        post = self._send()
+        args, kwargs = post.call_args
+        self.assertEqual(args[0], 'https://api.resend.com/emails')
+        self.assertEqual(kwargs['headers']['Authorization'], 'Bearer re_test')
+        self.assertEqual(kwargs['json']['to'], ['john@example.com'])
+        self.assertEqual(kwargs['json']['from'], 'CrownEx <noreply@crownex.app>')
+        self.assertEqual(kwargs['json']['text'], 'Your code is 1234')
+
+    def test_api_error_raises(self):
+        from .resend_backend import ResendError
+
+        with self.assertRaisesMessage(ResendError, 'domain is not verified'):
+            self._send(403, {'message': 'The crownex.app domain is not verified.'})
