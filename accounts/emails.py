@@ -29,7 +29,7 @@ def send_otp_email(email: str, code: str, purpose: str = 'registration') -> None
             'If you did not create an account, you can ignore this email.'
         )
 
-    from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@crownex.app')
+    from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@crownexapp.com')
     try:
         send_mail(
             subject=subject,

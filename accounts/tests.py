@@ -266,7 +266,7 @@ class AuthFlowTests(TestCase):
         self.assertFalse(VerificationOTP.objects.exists())
 
 
-@override_settings(RESEND_API_KEY='re_test', DEFAULT_FROM_EMAIL='CrownEx <noreply@crownex.app>')
+@override_settings(RESEND_API_KEY='re_test', DEFAULT_FROM_EMAIL='CrownEx <noreply@crownexapp.com>')
 class ResendBackendTests(TestCase):
     def _send(self, response_status=200, body=None):
         from unittest import mock
@@ -297,7 +297,7 @@ class ResendBackendTests(TestCase):
         self.assertEqual(args[0], 'https://api.resend.com/emails')
         self.assertEqual(kwargs['headers']['Authorization'], 'Bearer re_test')
         self.assertEqual(kwargs['json']['to'], ['john@example.com'])
-        self.assertEqual(kwargs['json']['from'], 'CrownEx <noreply@crownex.app>')
+        self.assertEqual(kwargs['json']['from'], 'CrownEx <noreply@crownexapp.com>')
         self.assertEqual(kwargs['json']['text'], 'Your code is 1234')
 
     def test_api_error_raises(self):

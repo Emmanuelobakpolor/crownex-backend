@@ -282,7 +282,7 @@ else:
     EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
 # Fail fast instead of hanging the request if the email API stalls.
 EMAIL_TIMEOUT = int(os.environ.get('EMAIL_TIMEOUT', 15))
-DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'CrownEx <noreply@crownex.app>')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'CrownEx <noreply@crownexapp.com>')
 
 
 # Admin panel — shared secret required by POST /api/admin/create/ to
