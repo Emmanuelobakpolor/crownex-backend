@@ -284,6 +284,15 @@ else:
 EMAIL_TIMEOUT = int(os.environ.get('EMAIL_TIMEOUT', 15))
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'CrownEx <noreply@crownexapp.com>')
 
+# Who gets emailed when money stops flowing on its own (missed deposit
+# webhooks, failed settlements, a stale worker) — see crypto/alerts.py.
+# Comma-separated. Unset = alerts are only logged.
+OPS_ALERT_EMAILS = [e.strip() for e in os.environ.get('OPS_ALERT_EMAILS', '').split(',') if e.strip()]
+
+# The worker must check in this often, on the same commit as web, or
+# GET /api/crypto/health/ answers 503 — point an uptime monitor at it.
+WORKER_HEARTBEAT_MAX_AGE_SECONDS = int(os.environ.get('WORKER_HEARTBEAT_MAX_AGE_SECONDS', '300'))
+
 
 # Admin panel — shared secret required by POST /api/admin/create/ to
 # bootstrap the first admin account via Postman (see adminpanel/views.py).

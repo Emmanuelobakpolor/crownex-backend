@@ -7,6 +7,7 @@ from decimal import ROUND_DOWN, Decimal
 from io import StringIO
 from unittest import mock
 
+from django.core import mail
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -15,7 +16,7 @@ from rest_framework.test import APIClient
 from accounts.models import User
 from wallet.models import Wallet
 
-from . import quidax, settlements
+from . import alerts, quidax, settlements
 from .deposits import handle_deposit_webhook
 from .models import (
     CryptoDepositAddress,
@@ -28,6 +29,7 @@ from .models import (
     QuidaxSubAccount,
     QuoteType,
     SettlementStatus,
+    WorkerHeartbeat,
 )
 from .orders import (
     admin_approve_buy,
@@ -1250,6 +1252,147 @@ class MissedDepositReconcileTests(SettlementTestBase):
             _, cursor = reconcile_recent_deposits(after_pk=cursor, batch_size=1)
             self.assertEqual(cursor, 0)
         self.assertEqual([c.args[0] for c in listed.call_args_list], ['sub-1', 'sub-3'])
+
+
+@override_settings(OPS_ALERT_EMAILS=['ops@example.com'])
+class OpsAlertTests(SettlementTestBase):
+    """Money that stops flowing on its own must reach a human, not wait for
+    a customer to complain."""
+
+    def setUp(self):
+        super().setUp()
+        alerts._last_sent.clear()
+        self.addCleanup(alerts._last_sent.clear)
+        CryptoDepositAddress.objects.create(user=self.user, coin='usdt', network='BEP20', address='0x' + 'b' * 40)
+
+    def _reconcile(self, rows):
+        from .deposits import reconcile_recent_deposits
+
+        with mock.patch('crypto.quidax.list_deposits', return_value=rows):
+            return reconcile_recent_deposits()
+
+    def _row(self, deposit_id, hours_ago):
+        made = timezone.now() - timedelta(hours=hours_ago)
+        return {
+            'id': deposit_id, 'amount': '50', 'currency': 'USDT', 'status': 'accepted',
+            'created_at': made.isoformat(), 'txid': '0xabc',
+        }
+
+    def test_deposit_rescued_by_backup_check_alerts_once(self):
+        self._reconcile([self._row('dep-missed', 2)])
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('webhook missed', mail.outbox[0].subject)
+        self.assertIn('dep-missed', mail.outbox[0].body)
+        self.assertEqual(mail.outbox[0].to, ['ops@example.com'])
+
+        self._reconcile([self._row('dep-missed', 2)])
+        self.assertEqual(len(mail.outbox), 1, 'already credited — no second alert')
+
+    def test_too_old_deposit_alerts_with_the_manual_command(self):
+        self._reconcile([self._row('dep-old', 24 * 10)])
+        self.assertFalse(CryptoDepositEvent.objects.exists())
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('reconcile_crypto_deposits --email ada@example.com --coin usdt --apply', mail.outbox[0].body)
+
+        self._reconcile([self._row('dep-old', 24 * 10)])
+        self.assertEqual(len(mail.outbox), 1, 'deduped within the cooldown')
+
+    def test_failed_settlement_alerts(self):
+        s = self.deposit('dep-1')
+        QuidaxSubAccount.objects.filter(user=self.user).delete()
+        self.run_worker()
+        s.refresh_from_db()
+        self.assertEqual(s.status, SettlementStatus.FAILED)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn(f'--retry {s.pk}', mail.outbox[0].body)
+
+    @override_settings(QUIDAX_WEBHOOK_SECRET='real-secret')
+    def test_signed_webhook_with_wrong_secret_alerts_but_unsigned_probe_does_not(self):
+        url = '/api/crypto/webhook/quidax/'
+        response = APIClient().post(url, {'event': 'ping'}, format='json')
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(mail.outbox, [])
+
+        response = APIClient().post(
+            url, {'event': 'ping'}, format='json', HTTP_QUIDAX_SIGNATURE='t=1,s=deadbeef'
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('signature mismatch', mail.outbox[0].subject)
+
+    def test_alerts_are_only_logged_without_recipients(self):
+        with override_settings(OPS_ALERT_EMAILS=[]):
+            self._reconcile([self._row('dep-missed', 2)])
+        self.assertEqual(mail.outbox, [])
+        self.assertTrue(CryptoDepositEvent.objects.filter(quidax_deposit_id='dep-missed').exists())
+
+
+class WebhookTrailingSlashTests(SettlementTestBase):
+    def test_deposit_webhook_without_trailing_slash_still_credits(self):
+        with mock.patch('crypto.views._quidax_signature_valid', return_value=True), override_settings(
+            QUIDAX_WEBHOOK_SECRET='test'
+        ):
+            response = APIClient().post(
+                '/api/crypto/webhook/quidax',
+                {
+                    'event': 'deposit.successful',
+                    'data': {'id': 'dep-ns', 'currency': 'usdt', 'amount': '10', 'user': {'id': 'sub-1'}},
+                },
+                format='json',
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.crypto().total, Decimal('10'))
+
+
+@override_settings(WORKER_HEARTBEAT_MAX_AGE_SECONDS=300)
+class WorkerHealthTests(TestCase):
+    url = '/api/crypto/health/'
+
+    def _beat(self, commit, seconds_ago=0):
+        WorkerHeartbeat.objects.update_or_create(
+            name=WorkerHeartbeat.SETTLEMENT_WORKER,
+            defaults={'commit': commit, 'beat_at': timezone.now() - timedelta(seconds=seconds_ago)},
+        )
+
+    def _get(self, web_commit='a' * 40):
+        with mock.patch('crypto.views.current_build_info', return_value={'commit': web_commit}):
+            return APIClient().get(self.url)
+
+    def test_no_heartbeat_is_unhealthy(self):
+        response = self._get()
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('worker has never checked in', response.data['problems'])
+
+    def test_fresh_heartbeat_on_same_commit_is_healthy(self):
+        self._beat('a' * 40, seconds_ago=20)
+        response = self._get()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['ok'])
+
+    def test_stale_heartbeat_is_unhealthy(self):
+        self._beat('a' * 40, seconds_ago=900)
+        self.assertEqual(self._get().status_code, 503)
+
+    def test_worker_on_older_commit_than_web_is_unhealthy(self):
+        self._beat('c4242c8' + '0' * 33)
+        response = self._get()
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('worker runs c4242c8, web runs aaaaaaa', response.data['problems'])
+
+    def test_worker_loop_writes_heartbeat(self):
+        with mock.patch('crypto.settlements.process_due', return_value=0), mock.patch(
+            'crypto.management.commands.process_deposit_settlements.current_build_info',
+            return_value={'commit': 'f' * 40},
+        ), mock.patch('crypto.deposits.reconcile_recent_deposits', return_value=([], 0)), mock.patch(
+            'crypto.orders.reconcile_due_instant_swaps', return_value=[]
+        ), mock.patch(
+            'crypto.management.commands.process_deposit_settlements.reconcile_pending_withdrawals', return_value=[]
+        ), mock.patch(
+            'crypto.management.commands.process_deposit_settlements.reconcile_pending_purchases', return_value=[]
+        ):
+            call_command('process_deposit_settlements', stdout=StringIO())
+        beat = WorkerHeartbeat.objects.get(name=WorkerHeartbeat.SETTLEMENT_WORKER)
+        self.assertEqual(beat.commit, 'f' * 40)
 
 
 class NetworkValidationTests(TestCase):

@@ -10,14 +10,19 @@ import hmac
 import json
 import logging
 
+from datetime import timedelta
+
 from django.conf import settings
+from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from . import deposits, orders, services, settlements, withdrawals
-from .models import CryptoDepositEvent, OrderStatus
+from accounts.version import current_build_info
+
+from . import alerts, deposits, orders, services, settlements, withdrawals
+from .models import CryptoDepositEvent, OrderStatus, WorkerHeartbeat
 from .serializers import (
     CryptoDepositSerializer,
     CryptoOrderSerializer,
@@ -380,12 +385,32 @@ class QuidaxWebhookView(APIView):
         logger.info('Quidax webhook received (%s bytes, signature header: %s)', len(raw_body), bool(sig_header))
         if not secret:
             logger.error('Quidax webhook rejected: QUIDAX_WEBHOOK_SECRET is not set.')
+            alerts.send_ops_alert(
+                'Quidax webhooks are being rejected',
+                'QUIDAX_WEBHOOK_SECRET is not set on the web service, so every Quidax webhook '
+                '(deposits included) is refused. Set it in Railway to the Signature Secret from '
+                'the Quidax dashboard.',
+                key='webhook-no-secret',
+                cooldown=timedelta(hours=1),
+            )
             return Response({'detail': 'Webhook not configured.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
         if not _quidax_signature_valid(secret, sig_header, raw_body):
             logger.warning(
                 'Quidax webhook signature mismatch (header present: %s)', bool(sig_header),
             )
+            # Only signed requests are worth waking someone for — an unsigned
+            # POST is a probe, not Quidax with a mismatched secret.
+            if sig_header:
+                alerts.send_ops_alert(
+                    'Quidax webhook signature mismatch',
+                    'A signed Quidax webhook was rejected because its signature did not match. '
+                    'QUIDAX_WEBHOOK_SECRET in Railway likely differs from the Signature Secret in '
+                    'the Quidax dashboard — until they match, deposits are only credited by the '
+                    "worker's backup check.",
+                    key='webhook-bad-signature',
+                    cooldown=timedelta(hours=1),
+                )
             return Response({'detail': 'Invalid signature.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         event = request.data.get('event')
@@ -404,6 +429,38 @@ class QuidaxWebhookView(APIView):
                 withdrawals.handle_withdraw_webhook(request.data, rejected=rejected)
 
         return Response({'status': 'ok'})
+
+
+class HealthView(APIView):
+    """GET /api/crypto/health/ — 200 when the settlement worker has checked
+    in recently on the same commit as web, 503 otherwise. Point an uptime
+    monitor at it: the worker crediting missed deposits is what keeps a
+    broken Quidax webhook from stranding customers' money."""
+
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        web_commit = current_build_info()['commit']
+        beat = WorkerHeartbeat.objects.filter(name=WorkerHeartbeat.SETTLEMENT_WORKER).first()
+        problems = []
+        age = None
+        if beat is None:
+            problems.append('worker has never checked in')
+        else:
+            age = int((timezone.now() - beat.beat_at).total_seconds())
+            if age > settings.WORKER_HEARTBEAT_MAX_AGE_SECONDS:
+                problems.append(f'worker last checked in {age}s ago')
+            if web_commit != 'unknown' and beat.commit and beat.commit != web_commit:
+                problems.append(f'worker runs {beat.commit[:7]}, web runs {web_commit[:7]}')
+        body = {
+            'ok': not problems,
+            'problems': problems,
+            'web_commit': web_commit[:7],
+            'worker_commit': beat.commit[:7] if beat else None,
+            'worker_last_seen_seconds': age,
+        }
+        return Response(body, status=status.HTTP_200_OK if not problems else status.HTTP_503_SERVICE_UNAVAILABLE)
 
 
 class WithdrawView(APIView):

@@ -23,7 +23,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from . import quidax, settlements
+from . import alerts, quidax, settlements
 from .models import CryptoDepositAddress, CryptoDepositEvent, CryptoOrder, OrderStatus, QuidaxSubAccount
 from .orders import _log as _log_order_event
 from .quidax import QuidaxError
@@ -433,11 +433,32 @@ def reconcile_recent_deposits(*, after_pk: int = 0, batch_size: int = 25) -> tup
                         r['id'], r['amount'], r['currency'], user.email,
                     )
                     credited.append((user, r))
+                    # The user is made whole, but a missed webhook usually means
+                    # Quidax stopped delivering for everyone — someone should look.
+                    alerts.send_ops_alert(
+                        'Quidax deposit webhook missed',
+                        f'Deposit {r["id"]} ({r["amount"]} {r["currency"]} for {user.email}, '
+                        f'txid {r["txid"] or "?"}) never arrived by webhook and was credited by the '
+                        'worker\'s backup check. If this repeats, Quidax webhooks are not being '
+                        'delivered — check the webhook settings in the Quidax dashboard.',
+                        key=f'deposit-missed:{r["id"]}',
+                        cooldown=timedelta(days=7),
+                    )
                 elif r['action'] == 'too_old':
                     logger.info(
                         'Deposit %s (%s %s for %s) was never credited and is too old to credit '
                         'automatically — check it and run reconcile_crypto_deposits --apply.',
                         r['id'], r['amount'], r['currency'], user.email,
+                    )
+                    alerts.send_ops_alert(
+                        'Uncredited crypto deposit needs review',
+                        f'Deposit {r["id"]} ({r["amount"]} {r["currency"]} for {user.email}, '
+                        f'txid {r["txid"] or "?"}) was accepted by Quidax but never credited, and is '
+                        'too old to credit automatically. If it was not paid out by hand, run:\n\n'
+                        f'python manage.py reconcile_crypto_deposits --email {user.email} '
+                        f'--coin {coin} --apply',
+                        key=f'deposit-too-old:{r["id"]}',
+                        cooldown=timedelta(days=1),
                     )
     next_pk = sub_accounts[-1].pk if len(sub_accounts) == batch_size else 0
     return credited, next_pk

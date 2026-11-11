@@ -40,7 +40,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from . import quidax
+from . import alerts, quidax
 from .models import (
     CryptoDepositEvent,
     CryptoDepositSettlement,
@@ -219,6 +219,18 @@ def _fail(s: CryptoDepositSettlement, from_status: str, reason: str, *, release:
     if release:
         _release_reservation(s, 'Conversion abandoned — the user keeps the crypto.')
     _event(s, 'settlement_failed', reason, level=logging.ERROR)
+    alerts.send_ops_alert(
+        'Crypto deposit settlement failed',
+        f'Settlement {s.pk} ({s.amount} {s.coin.upper()} for {s.user.email}) failed: {reason}\n\n'
+        + (
+            'The user keeps the crypto. Retry with: '
+            if release
+            else 'Check the Quidax dashboard before retrying — the sell may have gone through. Then: '
+        )
+        + f'python manage.py process_deposit_settlements --retry {s.pk}',
+        key=f'settlement-failed:{s.pk}',
+        cooldown=timedelta(days=7),
+    )
 
 
 # ─── Sweep ──────────────────────────────────────────────────────────────────

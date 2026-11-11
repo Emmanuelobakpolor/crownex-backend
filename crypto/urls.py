@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import path, re_path
 
 from . import views
 
@@ -26,7 +26,10 @@ urlpatterns = [
     path('address/<str:coin>/', views.DepositAddressView.as_view(), name='crypto-address'),
     path('account/ensure/', views.EnsureAccountView.as_view(), name='crypto-account-ensure'),
     path('settings/', views.CryptoSettingsView.as_view(), name='crypto-settings'),
-    path('webhook/quidax/', views.QuidaxWebhookView.as_view(), name='crypto-webhook'),
+    # Optional trailing slash: Django can't redirect a POST, so a URL saved
+    # without it in the Quidax dashboard would 500 every deposit webhook.
+    re_path(r'^webhook/quidax/?$', views.QuidaxWebhookView.as_view(), name='crypto-webhook'),
+    path('health/', views.HealthView.as_view(), name='crypto-health'),
     path('withdraw/', views.WithdrawView.as_view(), name='crypto-withdraw'),
     path(
         'withdraw/estimate/',

@@ -504,3 +504,19 @@ class CryptoWithdrawalLog(models.Model):
 
     def __str__(self):
         return f'{self.event} — withdrawal {self.withdrawal.reference}'
+
+
+class WorkerHeartbeat(models.Model):
+    """Last check-in from a background process, with the commit it runs —
+    so GET /api/crypto/health/ can tell when the worker is down or is still
+    running an older deploy than web (it once sat a month behind, without
+    the missed-deposit backup check)."""
+
+    SETTLEMENT_WORKER = 'deposit-settlements'
+
+    name = models.CharField(max_length=40, unique=True)
+    commit = models.CharField(max_length=64, blank=True)
+    beat_at = models.DateTimeField()
+
+    def __str__(self):
+        return f'{self.name} @ {self.commit[:7] or "?"} — {self.beat_at:%Y-%m-%d %H:%M:%S}'

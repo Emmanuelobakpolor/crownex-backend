@@ -19,9 +19,11 @@ import time
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections
+from django.utils import timezone
 
+from accounts.version import current_build_info
 from crypto import deposits, orders, settlements
-from crypto.models import CryptoDepositSettlement, SettlementStatus
+from crypto.models import CryptoDepositSettlement, SettlementStatus, WorkerHeartbeat
 from crypto.services import CryptoServiceError
 from giftcards.services import reconcile_pending_purchases
 from wallet.services import reconcile_pending_withdrawals
@@ -62,8 +64,17 @@ class Command(BaseCommand):
 
         last_swap_check = 0.0
         deposit_cursor = 0
+        commit = current_build_info()['commit']
         while True:
             close_old_connections()
+            # Check in first, so /api/crypto/health/ shows the worker alive
+            # (and on which commit) even while a pass below is failing.
+            try:
+                WorkerHeartbeat.objects.update_or_create(
+                    name=WorkerHeartbeat.SETTLEMENT_WORKER, defaults={'commit': commit, 'beat_at': timezone.now()}
+                )
+            except Exception:
+                logger.exception('worker_heartbeat_error')
             processed = settlements.process_due()
             if processed:
                 self.stdout.write(f'Processed {processed} settlement(s).')
