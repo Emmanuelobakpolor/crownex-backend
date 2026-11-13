@@ -20,6 +20,8 @@ urlpatterns = [
     path('api/crypto/', include('crypto.urls')),
     path('api/kyc/', include('kyc.urls')),
     path('api/cards/', include('cards.urls')),
+    path('api/support/', include('support.urls')),
+    path('api/admin/support/', include('support.admin_urls')),
     path('api/admin/', include('adminpanel.urls')),
     path('api/version/', VersionView.as_view(), name='version'),
 ]

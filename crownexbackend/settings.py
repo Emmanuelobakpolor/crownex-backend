@@ -75,6 +75,7 @@ INSTALLED_APPS = [
     'kyc',
     'cards',
     'adminpanel',
+    'support',
 ]
 
 MIDDLEWARE = [
