@@ -88,15 +88,29 @@ def _local_phone_number(phone: str) -> str:
     return digits
 
 
+def _split_name(user, verification) -> tuple[str, str]:
+    """Bitnob requires both first_name and last_name. Prefers the KYC name,
+    falls back to the account name; a single-word name is rejected here
+    rather than sending Bitnob a made-up surname."""
+    for candidate in (verification.full_name, user.full_name):
+        parts = (candidate or '').split()
+        if len(parts) >= 2:
+            return parts[0], ' '.join(parts[1:])
+    raise CardServiceError(
+        'Your profile needs both a first and last name before a card can be issued.',
+        code='name_incomplete',
+    )
+
+
 def _customer_payload(user, verification, address: str) -> dict:
     """Builds Bitnob's nested `customer` object from data already collected
     during KYC — no separate re-entry of identity fields."""
     id_type_map = {'nin': 'national_id', 'bvn': 'national_id'}
-    first_name, _, last_name = (verification.full_name or user.full_name).partition(' ')
+    first_name, last_name = _split_name(user, verification)
     return {
         'customer_type': 'individual',
-        'first_name': first_name or user.full_name or 'Unknown',
-        'last_name': last_name or '',
+        'first_name': first_name,
+        'last_name': last_name,
         'email': user.email,
         'phone_number': _local_phone_number(user.phone),
         'dial_code': '+234',
@@ -124,6 +138,10 @@ def request_card(user, *, pin: str, address: str = '') -> VirtualCard:
             'Complete identity verification before requesting a card.', code='kyc_not_approved'
         )
 
+    # Built before the card row exists so a validation failure (e.g. missing
+    # last name) leaves nothing behind.
+    customer = _customer_payload(user, verification, address)
+
     reference = _card_reference()
     card = VirtualCard.objects.create(user=user, reference=reference, status=CardStatus.PENDING)
 
@@ -133,7 +151,7 @@ def request_card(user, *, pin: str, address: str = '') -> VirtualCard:
             currency='USD',
             name=verification.full_name or user.full_name or user.email,
             reference=reference,
-            customer=_customer_payload(user, verification, address),
+            customer=customer,
         )
     except BitnobError as exc:
         _log(card, 'bitnob_error', exc.message)
