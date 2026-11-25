@@ -128,17 +128,25 @@ def _request(method: str, path: str, *, body: dict | None = None, params: dict |
             )
         parsed = _parse(response)
         if not response.ok:
-            error = parsed.get('error') if isinstance(parsed, dict) else None
-            message = parsed.get('message') if isinstance(parsed, dict) else None
-            if not message and isinstance(error, dict):
-                message = error.get('message')
-            elif not message and isinstance(error, str):
-                message = error
+            # Bitnob uses two error shapes: {"error": {"code", "message",
+            # "details"}} and RFC 7807 problem+json {"code", "detail", ...}.
+            body = parsed if isinstance(parsed, dict) else {}
+            error = body.get('error')
+            message = body.get('detail') or body.get('message')
+            error_code = body.get('code')
+            if isinstance(error, dict):
+                message = message or error.get('message')
+                error_code = error_code or error.get('code')
+                details = error.get('details')
+                if isinstance(details, dict) and details:
+                    message = f"{message}: {'; '.join(str(v) for v in details.values())}"
+            elif isinstance(error, str):
+                message = message or error
             raise BitnobError(
                 message or f'Bitnob returned {response.status_code}: {response.text[:300]}',
-                parsed if isinstance(parsed, dict) else {},
+                body,
                 status_code=response.status_code,
-                error_code=(error or {}).get('code') if isinstance(error, dict) else None,
+                error_code=error_code,
             )
         return parsed
 

@@ -34,6 +34,10 @@ from .models import (
 
 MICRO_PER_UNIT = Decimal('1000000')
 
+# Bitnob's minimum amount for POST /api/cards; charged to the user's NGN
+# wallet and loaded as the card's opening balance.
+CARD_OPENING_USD = Decimal('2')
+
 
 class CardServiceError(Exception):
     """Domain error with a machine-readable code and HTTP status."""
@@ -142,12 +146,27 @@ def request_card(user, *, pin: str, address: str = '') -> VirtualCard:
     # last name) leaves nothing behind.
     customer = _customer_payload(user, verification, address)
 
+    # Bitnob rejects card creation below $2, so the user pays that minimum
+    # as the card's opening balance. No explicit refund path: a Bitnob
+    # failure raises inside this atomic block and rolls the debit back.
+    opening_ngn = (CARD_OPENING_USD * settings.BITNOB_NGN_PER_USD).quantize(Decimal('0.01'))
+    try:
+        debit_wallet(user, opening_ngn)
+    except WalletServiceError as exc:
+        if exc.code == 'insufficient_balance':
+            raise CardServiceError(
+                f'You need ₦{opening_ngn:,} in your wallet to create a card — it becomes '
+                f'your card\'s opening balance of ${CARD_OPENING_USD}.',
+                code='insufficient_balance',
+            )
+        raise CardServiceError(exc.message, code=exc.code, status=exc.status)
+
     reference = _card_reference()
     card = VirtualCard.objects.create(user=user, reference=reference, status=CardStatus.PENDING)
 
     try:
         payload = bitnob.create_card(
-            amount_micro=0,
+            amount_micro=decimal_to_micro(CARD_OPENING_USD),
             currency='USD',
             name=verification.full_name or user.full_name or user.email,
             reference=reference,
@@ -169,7 +188,17 @@ def request_card(user, *, pin: str, address: str = '') -> VirtualCard:
     card.raw_response = payload
     card.save()
 
-    _log(card, 'card_requested', f'bitnob_card_id={card.bitnob_card_id}')
+    CardTransaction.objects.create(
+        card=card,
+        reference=_transaction_reference('OPEN'),
+        type=CardTransactionType.FUNDING,
+        status=CardTransactionStatus.COMPLETED,
+        amount_usd_micro=str(decimal_to_micro(CARD_OPENING_USD)),
+        ngn_amount=opening_ngn,
+        description='Opening balance on card creation',
+    )
+
+    _log(card, 'card_requested', f'bitnob_card_id={card.bitnob_card_id}, opening ₦{opening_ngn}')
     return card
 
 
