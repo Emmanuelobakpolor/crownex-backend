@@ -131,9 +131,13 @@ def _request(method: str, path: str, *, body: dict | None = None, params: dict |
             # Bitnob uses two error shapes: {"error": {"code", "message",
             # "details"}} and RFC 7807 problem+json {"code", "detail", ...}.
             body = parsed if isinstance(parsed, dict) else {}
+            # problem+json's top-level `code` is generic (VALIDATION_ERROR);
+            # the specific one, e.g. COMPANY_INSUFFICIENT_BALANCE, is in
+            # extensions.error_code.
             error = body.get('error')
+            extensions = body.get('extensions')
             message = body.get('detail') or body.get('message')
-            error_code = body.get('code')
+            error_code = (extensions.get('error_code') if isinstance(extensions, dict) else None) or body.get('code')
             if isinstance(error, dict):
                 message = message or error.get('message')
                 error_code = error_code or error.get('code')

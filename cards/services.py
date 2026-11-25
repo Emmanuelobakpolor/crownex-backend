@@ -10,6 +10,7 @@ demonstrably failed before anything moved on Bitnob's side.
 
 from __future__ import annotations
 
+import logging
 import secrets
 import time
 from decimal import ROUND_DOWN, Decimal
@@ -32,11 +33,17 @@ from .models import (
     VirtualCard,
 )
 
+logger = logging.getLogger(__name__)
+
 MICRO_PER_UNIT = Decimal('1000000')
 
 # Bitnob's minimum amount for POST /api/cards; charged to the user's NGN
 # wallet and loaded as the card's opening balance.
 CARD_OPENING_USD = Decimal('2')
+
+# Bitnob also takes this from the company USDT balance per card created
+# ($4 required for a $2 card); passed on to the user, not loaded on the card.
+CARD_CREATION_FEE_USD = Decimal('2')
 
 
 class CardServiceError(Exception):
@@ -47,6 +54,19 @@ class CardServiceError(Exception):
         self.message = message
         self.code = code
         self.status = status
+
+
+def _bitnob_failure(exc: BitnobError, message: str) -> CardServiceError:
+    """A short company USDT balance is an ops problem, not the user's: hide
+    the balance figures from them and flag it loudly in the server log."""
+    if exc.error_code == 'COMPANY_INSUFFICIENT_BALANCE':
+        logger.error('Bitnob company USDT balance too low — top it up: %s', exc.message)
+        return CardServiceError(
+            'Card services are temporarily unavailable. Please try again later.',
+            code='cards_unavailable',
+            status=503,
+        )
+    return CardServiceError(message, code='bitnob_unreachable', status=502)
 
 
 def micro_to_decimal(value: str | int) -> Decimal:
@@ -146,17 +166,19 @@ def request_card(user, *, pin: str, address: str = '') -> VirtualCard:
     # last name) leaves nothing behind.
     customer = _customer_payload(user, verification, address)
 
-    # Bitnob rejects card creation below $2, so the user pays that minimum
-    # as the card's opening balance. No explicit refund path: a Bitnob
-    # failure raises inside this atomic block and rolls the debit back.
-    opening_ngn = (CARD_OPENING_USD * settings.BITNOB_NGN_PER_USD).quantize(Decimal('0.01'))
+    # The user pays the creation fee plus Bitnob's $2 minimum, which becomes
+    # the card's opening balance. No explicit refund path: a Bitnob failure
+    # raises inside this atomic block and rolls the debit back.
+    charge_ngn = (
+        (CARD_OPENING_USD + CARD_CREATION_FEE_USD) * settings.BITNOB_NGN_PER_USD
+    ).quantize(Decimal('0.01'))
     try:
-        debit_wallet(user, opening_ngn)
+        debit_wallet(user, charge_ngn)
     except WalletServiceError as exc:
         if exc.code == 'insufficient_balance':
             raise CardServiceError(
-                f'You need ₦{opening_ngn:,} in your wallet to create a card — it becomes '
-                f'your card\'s opening balance of ${CARD_OPENING_USD}.',
+                f'You need ₦{charge_ngn:,} in your wallet to create a card: a '
+                f'${CARD_CREATION_FEE_USD} card fee plus a ${CARD_OPENING_USD} opening balance.',
                 code='insufficient_balance',
             )
         raise CardServiceError(exc.message, code=exc.code, status=exc.status)
@@ -174,7 +196,7 @@ def request_card(user, *, pin: str, address: str = '') -> VirtualCard:
         )
     except BitnobError as exc:
         _log(card, 'bitnob_error', exc.message)
-        raise CardServiceError(f'Could not create card: {exc.message}', code='bitnob_unreachable', status=502)
+        raise _bitnob_failure(exc, f'Could not create card: {exc.message}')
 
     data = (payload.get('data') or {}).get('card') or {}
     card.bitnob_card_id = data.get('id', '')
@@ -194,11 +216,12 @@ def request_card(user, *, pin: str, address: str = '') -> VirtualCard:
         type=CardTransactionType.FUNDING,
         status=CardTransactionStatus.COMPLETED,
         amount_usd_micro=str(decimal_to_micro(CARD_OPENING_USD)),
-        ngn_amount=opening_ngn,
-        description='Opening balance on card creation',
+        fee_usd_micro=str(decimal_to_micro(CARD_CREATION_FEE_USD)),
+        ngn_amount=charge_ngn,
+        description='Card fee and opening balance on card creation',
     )
 
-    _log(card, 'card_requested', f'bitnob_card_id={card.bitnob_card_id}, opening ₦{opening_ngn}')
+    _log(card, 'card_requested', f'bitnob_card_id={card.bitnob_card_id}, charged ₦{charge_ngn}')
     return card
 
 
@@ -266,7 +289,7 @@ def _adjust_card_balance(user, card: VirtualCard, *, ngn_amount: Decimal, type_:
             _log(card, 'fund_failed_refunded', f'{exc.message} — ₦{ngn_amount} refunded to wallet.')
         else:
             _log(card, 'withdraw_failed', exc.message)
-        raise CardServiceError(f'Card {type_} failed: {exc.message}', code='bitnob_unreachable', status=502)
+        raise _bitnob_failure(exc, f'Card {type_} failed: {exc.message}')
 
     tx_data = (payload.get('data') or {}).get('transaction') or {}
     card_tx.bitnob_transaction_id = tx_data.get('id', '')
