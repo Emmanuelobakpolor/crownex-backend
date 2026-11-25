@@ -3,9 +3,8 @@
 Run on a machine with real internet access:
     python test_bitnob_auth.py
 
-Fill in your real CLIENT_ID/CLIENT_SECRET below (or set them as env vars)
-before running. Delete this file when done — it's not meant to be
-committed with real credentials in it.
+Set BITNOB_CLIENT_ID and BITNOB_CLIENT_SECRET as env vars before running.
+Never hardcode real credentials in this file.
 """
 
 import hashlib
@@ -17,8 +16,8 @@ import time
 
 import requests
 
-CLIENT_ID = os.environ.get('BITNOB_CLIENT_ID', '56753922-75b3-4403-bbd8-96f6b83c24d5')
-CLIENT_SECRET = os.environ.get('BITNOB_CLIENT_SECRET', 'live_6532e93062f8d140f729c6839b27c6e1b97d8891d68695fa919d992ea0ad83f6')
+CLIENT_ID = os.environ['BITNOB_CLIENT_ID']
+CLIENT_SECRET = os.environ['BITNOB_CLIENT_SECRET']
 BASE_URL = os.environ.get('BITNOB_BASE_URL', 'https://api.bitnob.com')
 
 
