@@ -25,11 +25,14 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import time
 
 import requests
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 _TIMEOUT = 30
 _MAX_RETRIES = 3
@@ -117,12 +120,22 @@ def _request(method: str, path: str, *, body: dict | None = None, params: dict |
             time.sleep(0.5 * (2**attempt))
             continue
 
+        if not response.ok:
+            # Log the raw body before parsing — the response shape varies
+            # and a generic "returned 400" hides which field was rejected.
+            logger.warning(
+                'Bitnob %s %s -> %s: %s', method, path, response.status_code, response.text[:2000]
+            )
         parsed = _parse(response)
         if not response.ok:
             error = parsed.get('error') if isinstance(parsed, dict) else None
             message = parsed.get('message') if isinstance(parsed, dict) else None
+            if not message and isinstance(error, dict):
+                message = error.get('message')
+            elif not message and isinstance(error, str):
+                message = error
             raise BitnobError(
-                message or f'Bitnob returned {response.status_code}.',
+                message or f'Bitnob returned {response.status_code}: {response.text[:300]}',
                 parsed if isinstance(parsed, dict) else {},
                 status_code=response.status_code,
                 error_code=(error or {}).get('code') if isinstance(error, dict) else None,
